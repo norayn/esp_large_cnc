@@ -214,7 +214,9 @@ static bool handleIdleCommands(const String& cmd) {
     }
     if (cmd == "GET_LAST_ABORTED_LINE") { sendToWiFiClient("LAST_LINE:" + String(cfg.lastExecutedLine)); return true; }
     if (cmd.startsWith("JOG:")) {
-        changeState(STATE_JOGGING); processSingleManualCommand(cmd.substring(4)); changeState(STATE_IDLE);
+        changeState(STATE_JOGGING); 
+        processSingleManualCommand(cmd.substring(4)); 
+        //changeState(STATE_IDLE);
         return true;
     }
     if (cmd == "HOME" || cmd == "$H") {

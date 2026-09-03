@@ -113,7 +113,10 @@ void motionTask(void * parameter) {
     while (true) {
         if (!nextSeg.hasNewData) {
             if (bufferTail == bufferHead) {
-                isVectorMoving = false;
+                if (isVectorMoving) {
+                    isVectorMoving = false;
+                    changeState(STATE_IDLE); // Станок перейдет в IDLE строго по факту остановки моторов!
+                }
             }
             vTaskDelay(pdMS_TO_TICKS(1)); 
             continue;
@@ -203,15 +206,13 @@ void motionTask(void * parameter) {
             idealY += deltaS * Ky * dirY;
             idealZ += deltaS * dz_val * dirZ;
 
-            long tStepsX = idealX * cfg.stepsPerMmX;
-            long tStepsY = idealY * cfg.stepsPerMmY;
-            long tStepsZ = idealZ * cfg.stepsPerMmZ;
+            long tStepsX = (long)roundf(idealX * cfg.stepsPerMmX);
+            long tStepsY = (long)roundf(idealY * cfg.stepsPerMmY);
+            long tStepsZ = (long)roundf(idealZ * cfg.stepsPerMmZ);
 
-            // ИСПРАВЛЕНО: Ждем место в буфере ДО генерации шага кадра.
-            // Никаких вложенных бесконечных while! Только чистый пошаговый контроль.
             uint32_t nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
             while (nextHead == bufferTail) { 
-                vTaskDelay(pdMS_TO_TICKS(1)); 
+                vTaskDelay(pdMS_TO_TICKS(2)); 
             }
 
             StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
@@ -222,16 +223,9 @@ void motionTask(void * parameter) {
             if (localStepsY != tStepsY) { cmd.stepY = 1; cmd.dirY = (tStepsY > localStepsY) ? 1 : 0; localStepsY += (tStepsY > localStepsY) ? 1 : -1; stateChanged = true; }
             if (localStepsZ != tStepsZ) { cmd.stepZ = 1; cmd.dirZ = (tStepsZ > localStepsZ) ? 1 : 0; localStepsZ += (tStepsZ > localStepsZ) ? 1 : -1; stateChanged = true; }
             
-            // Если физический шаг мотора нужен на этом такте таймера — укладываем его в буфер
-            if (stateChanged) {
-                cmd.valid = 1;
-                stepRingBuffer[bufferHead] = cmd;
-                bufferHead = nextHead; 
-            }
-
-            //if (tick % 5000 == 0) {
-            //    vTaskDelay(pdMS_TO_TICKS(1));
-            //}
+            cmd.valid = 1;
+            stepRingBuffer[bufferHead] = cmd;
+            bufferHead = nextHead; 
         }
 
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -286,8 +280,12 @@ void IRAM_ATTR onTimerInterrupt() {
                 digitalWrite(Y_STEP_PIN, LOW);
                 digitalWrite(Z_STEP_PIN, LOW);
             }
-        }// Сдвигаем указатель чтения (освобождая место для потока)
-        bufferTail = (bufferTail + 1) % STEP_BUFFER_SIZE;
+            // Сдвигаем указатель чтения (освобождая место для потока)
+            bufferTail = (bufferTail + 1) % STEP_BUFFER_SIZE;
+        } else {
+            // Аварийный сброс хвоста при пустом буфере
+            bufferTail = bufferHead; 
+        }
     }
 }
 

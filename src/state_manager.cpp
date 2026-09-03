@@ -73,7 +73,8 @@ void reportStatusToPC() {
         float mmX = currentStepsX / cfg.stepsPerMmX; 
         float mmY = currentStepsY / cfg.stepsPerMmY;
         float mmZ = currentStepsZ / cfg.stepsPerMmZ;
-        String statusStr = "<Status:" + getStateName() + 
+        String statusStr = "<Status:" + getStateName() +
+                   "|Time=" + String(millis()) +
                    "|Pos:X=" + String(mmX, 2) + 
                    ",Y=" + String(mmY, 2) + 
                    ",Z=" + String(mmZ, 2) + 
