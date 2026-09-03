@@ -30,6 +30,8 @@ void sendToWiFiClient(String message) {
     if (isWiFiClientConnected && tcpClient.connected()) {
         tcpClient.println(message);
     }
+
+    Serial.println(message); 
 }
 
 String processIncomingCommand(String cmd) {

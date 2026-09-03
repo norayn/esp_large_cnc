@@ -104,7 +104,7 @@ void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_M
 // --- ПОТОК ПЛАНИРОВЩИКА НА ЯДРЕ 1 ---
 void motionTask(void * parameter) {
     const float DT = 0.00001f; 
-    
+ 
     // Переменные положения планировщика (живут на протяжении всей работы потока)
     long localStepsX = 0; 
     long localStepsY = 0; 
@@ -228,7 +228,12 @@ void motionTask(void * parameter) {
                 stepRingBuffer[bufferHead] = cmd;
                 bufferHead = nextHead; 
             }
+
+            //if (tick % 5000 == 0) {
+            //    vTaskDelay(pdMS_TO_TICKS(1));
+            //}
         }
+
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
@@ -281,7 +286,8 @@ void IRAM_ATTR onTimerInterrupt() {
                 digitalWrite(Y_STEP_PIN, LOW);
                 digitalWrite(Z_STEP_PIN, LOW);
             }
-        }// Сдвигаем указатель чтения (освобождая место для потока)bufferTail = (bufferTail + 1) % STEP_BUFFER_SIZE;
+        }// Сдвигаем указатель чтения (освобождая место для потока)
+        bufferTail = (bufferTail + 1) % STEP_BUFFER_SIZE;
     }
 }
 

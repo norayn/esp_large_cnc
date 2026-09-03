@@ -137,7 +137,10 @@ String handleConfigCommand(String cmd) {
         cStr += "rapFeed=" + String(cfg.rapidFeedRate, 1) + ";";
         cStr += "maxX=" + String(cfg.maxX, 1) + ";";
         cStr += "maxY=" + String(cfg.maxY, 1) + ";";
-        cStr += "maxZ=" + String(cfg.maxZ, 1);
+        cStr += "maxZ=" + String(cfg.maxZ, 1) + ";";
+        cStr += "minX=" + String(cfg.minX, 1) + ";";
+        cStr += "minY=" + String(cfg.minY, 1) + ";";
+        cStr += "minZ=" + String(cfg.minZ, 1);
         return cStr;
     }
     
@@ -157,6 +160,9 @@ String handleConfigCommand(String cmd) {
             else if (key == "maxX")     cfg.maxX = val;
             else if (key == "maxY")     cfg.maxY = val;
             else if (key == "maxZ")     cfg.maxZ = val;
+            else if (key == "minX")     cfg.minX = val;
+            else if (key == "minY")     cfg.minY = val;
+            else if (key == "minZ")     cfg.minZ = val;
             else changed = false;
 
             if (changed) {
