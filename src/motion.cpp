@@ -179,6 +179,12 @@ void motionTask(void * parameter) {
 
         if (cfg.feedMultiplier < 0.01f) cfg.feedMultiplier = 1.0f;
 
+        float currentS = 0.0f; // Абсолютный пройденный путь по вектору
+        // Запоминаем стартовые физические координаты кадра
+        float startX = (float)localStepsX / cfg.stepsPerMmX;
+        float startY = (float)localStepsY / cfg.stepsPerMmY;
+        float startZ = (float)localStepsZ / cfg.stepsPerMmZ;
+
         // ГЕНЕРАЦИЯ ТАКТОВ ВРЕМЕНИ
         for (long tick = 0; tick < totalTicks; tick++) {
             
@@ -201,10 +207,11 @@ void motionTask(void * parameter) {
                 if (currentVectorSpeed < targetSpeed) currentVectorSpeed = targetSpeed;
             }
 
-            float deltaS = currentVectorSpeed * DT;
-            idealX += deltaS * Kx * dirX;
-            idealY += deltaS * Ky * dirY;
-            idealZ += deltaS * dz_val * dirZ;
+            currentS += currentVectorSpeed * DT;
+            if (currentS > totalLength) { currentS = totalLength; }
+            idealX = startX + currentS * Kx * dirX;
+            idealY = startY + currentS * Ky * dirY;
+            idealZ = startZ + currentS * dz_val * dirZ;
 
             long tStepsX = (long)roundf(idealX * cfg.stepsPerMmX);
             long tStepsY = (long)roundf(idealY * cfg.stepsPerMmY);
