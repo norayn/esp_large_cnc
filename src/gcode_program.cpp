@@ -55,16 +55,24 @@ bool addBinaryCommand(uint8_t type, uint16_t line, float x, float y, float z, fl
 
 
 void setWcsZero(char axis) {
-    // Рассчитываем смещение: WCS_Offset = Текущая машинная позиция в мм
-    if (axis == 'X' || axis == 'A') wcsOffset.x = -(currentStepsX / cfg.stepsPerMmX);
-    if (axis == 'Y' || axis == 'A') wcsOffset.y = -(currentStepsY / cfg.stepsPerMmY);
-    if (axis == 'Z' || axis == 'A') wcsOffset.z = -(currentStepsZ / cfg.stepsPerMmZ);
+    // Вычисляем текущую физическую координату станка в миллиметрах
+    float machineX = (float)currentStepsX / cfg.stepsPerMmX;
+    float machineY = (float)currentStepsY / cfg.stepsPerMmY;
+    float machineZ = (float)currentStepsZ / cfg.stepsPerMmZ;
+
+    // Смещение WCS (оффсет) должно быть в точности равно машинной позиции!
+    if (axis == 'X' || axis == 'A') cfg.wcsOffsetX = machineX;
+    if (axis == 'Y' || axis == 'A') cfg.wcsOffsetY = machineY;
+    if (axis == 'Z' || axis == 'A') cfg.wcsOffsetZ = machineZ;
     
-    // Синхронизируем глобальный конфиг и сохраняем его во флэш
-    cfg.wcsOffsetX = wcsOffset.x;
-    cfg.wcsOffsetY = wcsOffset.y;
-    cfg.wcsOffsetZ = wcsOffset.z;
-    saveWcsToEEPROM();
+    // Синхронизируем локальные переменные оффсетов (если они используются в gcode_program)
+    wcsOffset.x = cfg.wcsOffsetX;
+    wcsOffset.y = cfg.wcsOffsetY;
+    wcsOffset.z = cfg.wcsOffsetZ;
+
+    // Намертво сохраняем смещение G54 в энергонезависимую память Preferences
+    saveWcsToEEPROM(); 
+    Serial.printf("STATUS: WCS Zero set. Offsets: X=%.3f, Y=%.3f, Z=%.3f\n", cfg.wcsOffsetX, cfg.wcsOffsetY, cfg.wcsOffsetZ);
 }
 
 // ЦЕНТРАЛЬНЫЙ ДИСПЕТЧЕР КОМАНД

@@ -4,103 +4,43 @@
 MachineConfig cfg;
 Preferences preferences;
 
+// Вспомогательные перегруженные функции для Preferences (чтобы макрос работал с любыми типами)
+void p_put(const char* key, float val) { preferences.putFloat(key, val); }
+void p_put(const char* key, int val)   { preferences.putInt(key, val); }
+void p_put(const char* key, bool val)  { preferences.putBool(key, val); }
+
+float p_get(const char* key, float def) { return preferences.getFloat(key, def); }
+int   p_get(const char* key, int def)   { return preferences.getInt(key, def); }
+bool  p_get(const char* key, bool def)  { return preferences.getBool(key, def); }
+
 void initMachineConfigDefault() {
-    cfg.stepsPerMmX = 100.0; 
-    cfg.stepsPerMmY = 400.0; 
-    cfg.stepsPerMmZ = 400.0; 
-    cfg.defaultFeedRate = 600.0;  
-    cfg.rapidFeedRate   = 2000.0; 
-    cfg.maxAcceleration = 150.0;  
-    cfg.minVectorSpeed  = 2.0;    
-    cfg.laserGridStep   = 20.0;   
-    cfg.laserMapSize    = 201;    
-    cfg.pwmFrequency      = 5000; 
-    cfg.pwmResolutionBits = 10;   
-    cfg.minX = 0.0;    cfg.maxX = 4000.0; 
-    cfg.minY = 0.0;    cfg.maxY = 500.0;  
-    cfg.minZ = -200.0; cfg.maxZ = 0.0;    
-    cfg.allowJogBeforeHoming = true; 
-    cfg.wcsOffsetX = 0.0;
-    cfg.wcsOffsetY = 0.0;
-    cfg.wcsOffsetZ = 0.0;
-    cfg.isAlignmentActive = false;
-    cfg.slopeY = 0.0f;
-    cfg.slopeZ = 0.0f;
-    cfg.pointA_x = 0; cfg.pointA_y = 0; cfg.pointA_z = 0;
-    cfg.pointB_x = 0; cfg.pointB_y = 0; cfg.pointB_z = 0;
-    cfg.feedMultiplier = 1.0f;
+#define X(type, name, eeprom_key, default_val) cfg.name = default_val;
+    CONFIG_FIELDS
+#undef X
 }
 
 void saveConfigToEEPROM() {
     preferences.begin("cnc_cfg", false);
-    preferences.putFloat("stepsX", cfg.stepsPerMmX);
-    preferences.putFloat("stepsY", cfg.stepsPerMmY);
-    preferences.putFloat("stepsZ", cfg.stepsPerMmZ);
-    preferences.putFloat("defFeed", cfg.defaultFeedRate);
-    preferences.putFloat("rapFeed", cfg.rapidFeedRate);
-    preferences.putFloat("accel", cfg.maxAcceleration);
-    preferences.putFloat("minSpeed", cfg.minVectorSpeed);
-    preferences.putFloat("lGrid", cfg.laserGridStep);
-    preferences.putInt("lSize", cfg.laserMapSize);
-    preferences.putInt("pwmFreq", cfg.pwmFrequency);
-    preferences.putInt("pwmRes", cfg.pwmResolutionBits);
-    preferences.putFloat("minX", cfg.minX);
-    preferences.putFloat("maxX", cfg.maxX);
-    preferences.putFloat("minY", cfg.minY);
-    preferences.putFloat("maxY", cfg.maxY);
-    preferences.putFloat("minZ", cfg.minZ);
-    preferences.putFloat("maxZ", cfg.maxZ);
-    preferences.putBool("jogBefore", cfg.allowJogBeforeHoming);
-    // wcs нули сохраняются отдельно через saveWcsToEEPROM
+#define X(type, name, eeprom_key, default_val) p_put(eeprom_key, cfg.name);
+    CONFIG_FIELDS
+#undef X
     preferences.end();
 }
 
 void setupAndLoadConfig() {
     preferences.begin("cnc_cfg", true);
     
+    // Проверяем первый запуск по маркерному ключу базового параметра
     if (!preferences.isKey("stepsX")) {
         preferences.end();
         initMachineConfigDefault();
         saveConfigToEEPROM();
-        saveWcsToEEPROM();
         return;
     }
 
-    cfg.stepsPerMmX = preferences.getFloat("stepsX", 100.0);
-    cfg.stepsPerMmY = preferences.getFloat("stepsY", 400.0);
-    cfg.stepsPerMmZ = preferences.getFloat("stepsZ", 400.0);
-    cfg.defaultFeedRate = preferences.getFloat("defFeed", 600.0);
-    cfg.rapidFeedRate   = preferences.getFloat("rapFeed", 2000.0);
-    cfg.maxAcceleration = preferences.getFloat("accel", 150.0);
-    cfg.minVectorSpeed  = preferences.getFloat("minSpeed", 2.0);
-    cfg.laserGridStep   = preferences.getFloat("lGrid", 20.0);
-    cfg.laserMapSize    = preferences.getInt("lSize", 201);
-    cfg.pwmFrequency    = preferences.getInt("pwmFreq", 5000);
-    cfg.pwmResolutionBits = preferences.getInt("pwmRes", 10);
-    cfg.minX = preferences.getFloat("minX", 0.0);
-    cfg.maxX = preferences.getFloat("maxX", 4000.0);
-    cfg.minY = preferences.getFloat("minY", 0.0);
-    cfg.maxY = preferences.getFloat("maxY", 500.0);
-    cfg.minZ = preferences.getFloat("minZ", -200.0);
-    cfg.maxZ = preferences.getFloat("maxZ", 0.0);
-    cfg.allowJogBeforeHoming = preferences.getBool("jogBefore", true);
-    
-    // Загрузка временных рабочих нулей детали G54 из памяти
-    cfg.wcsOffsetX = preferences.getFloat("wcsX", 0.0);
-    cfg.wcsOffsetY = preferences.getFloat("wcsY", 0.0);
-    cfg.wcsOffsetZ = preferences.getFloat("wcsZ", 0.0);
-
-    cfg.isAlignmentActive = preferences.getBool("alignAct", false);
-    cfg.slopeY = preferences.getFloat("slopeY", 0.0f);
-    cfg.slopeZ = preferences.getFloat("slopeZ", 0.0f);
-    cfg.pointA_x = preferences.getFloat("ptAx", 0.0f);
-    cfg.pointA_y = preferences.getFloat("ptAy", 0.0f);
-    cfg.pointA_z = preferences.getFloat("ptAz", 0.0f);
-    cfg.pointB_x = preferences.getFloat("ptBx", 0.0f);
-    cfg.pointB_y = preferences.getFloat("ptBy", 0.0f);
-    cfg.pointB_z = preferences.getFloat("ptBz", 0.0f);
-    
-    cfg.lastExecutedLine = preferences.getInt("lastLine", 0);
+#define X(type, name, eeprom_key, default_val) cfg.name = p_get(eeprom_key, (type)default_val);
+    CONFIG_FIELDS
+#undef X
 
     preferences.end();
 }
@@ -127,52 +67,43 @@ void saveAlignmentToEEPROM() {
     preferences.end();
 }
 
+// АВТОМАТИЧЕСКАЯ СЕРИАЛИЗАЦИЯ И ДЕСЕРИАЛИЗАЦИЯ ДЛЯ ПК
 String handleConfigCommand(String cmd) {
     if (cmd == "GET_CONFIG") {
         String cStr = "CONFIG_DATA:";
-        cStr += "stepsX=" + String(cfg.stepsPerMmX, 1) + ";";
-        cStr += "stepsY=" + String(cfg.stepsPerMmY, 1) + ";";
-        cStr += "stepsZ=" + String(cfg.stepsPerMmZ, 1) + ";";
-        cStr += "accel=" + String(cfg.maxAcceleration, 1) + ";";
-        cStr += "rapFeed=" + String(cfg.rapidFeedRate, 1) + ";";
-        cStr += "maxX=" + String(cfg.maxX, 1) + ";";
-        cStr += "maxY=" + String(cfg.maxY, 1) + ";";
-        cStr += "maxZ=" + String(cfg.maxZ, 1) + ";";
-        cStr += "minX=" + String(cfg.minX, 1) + ";";
-        cStr += "minY=" + String(cfg.minY, 1) + ";";
-        cStr += "minZ=" + String(cfg.minZ, 1);
+        // Макрос сам соберет строку вида "ИМЯ=ЗНАЧЕНИЕ;ИМЯ=ЗНАЧЕНИЕ;" для ВСЕХ параметров
+#define X(type, name, eeprom_key, default_val) cStr += String(#name) + "=" + String(cfg.name) + ";";
+        CONFIG_FIELDS
+#undef X
         return cStr;
     }
     
     if (cmd.startsWith("SET_CONFIG:")) {
-        String pair = cmd.substring(11);
+        String pair = cmd.substring(11); // получаем "имя_в_коде=значение"
         int eq = pair.indexOf('=');
         if (eq != -1) {
-            String key = pair.substring(0, eq);
-            float val = pair.substring(eq + 1).toFloat();
-            bool changed = true;
-            
-            if (key == "stepsX")  cfg.stepsPerMmX = val;
-            else if (key == "stepsY")  cfg.stepsPerMmY = val;
-            else if (key == "stepsZ")  cfg.stepsPerMmZ = val;
-            else if (key == "accel")    cfg.maxAcceleration = val;
-            else if (key == "rapFeed")  cfg.rapidFeedRate = val;
-            else if (key == "maxX")     cfg.maxX = val;
-            else if (key == "maxY")     cfg.maxY = val;
-            else if (key == "maxZ")     cfg.maxZ = val;
-            else if (key == "minX")     cfg.minX = val;
-            else if (key == "minY")     cfg.minY = val;
-            else if (key == "minZ")     cfg.minZ = val;
-            else changed = false;
+            String targetKey = pair.substring(0, eq);
+            String valStr = pair.substring(eq + 1);
+            bool found = false;
 
-            if (changed) {
-                saveConfigToEEPROM();
-                return "STATUS: Config updated and saved to EEPROM.";
+            // Сравниваем имя со всеми полями из макроса автоматически
+#define X(type, name, eeprom_key, default_val) \
+            if (targetKey == #name) { \
+                if (sizeof(type) == sizeof(bool)) cfg.name = (valStr.toInt() != 0); \
+                else if (String(#type) == "int") cfg.name = valStr.toInt(); \
+                else cfg.name = valStr.toFloat(); \
+                found = true; \
+            }
+            CONFIG_FIELDS
+#undef X
+
+            if (found) {
+                saveConfigToEEPROM(); // сохраняем обновленный конфиг
+                return "STATUS: Config parameter " + targetKey + " updated and saved.";
             } else {
-                return "ERROR: Unknown config key!";
+                return "ERROR: Config parameter " + targetKey + " not found!";
             }
         }
     }
     return "";
 }
-

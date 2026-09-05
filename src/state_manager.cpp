@@ -13,6 +13,9 @@ static unsigned long lastReportTime = 0;
 
 extern volatile uint16_t currentExecutingLineNum; // подтягиваем из gcode_program
 
+static String lastSentStatusStr = ""; // Хранилище для сравнения изменений
+
+
 String getStateName() {
     String lockStatus = isHomed ? "" : " (LOCKED)";
     switch (currentMachineState) {
@@ -68,18 +71,42 @@ void checkHardwareSecurity() {
 }
 
 void reportStatusToPC() {
-    if (millis() - lastReportTime > 1000) {
-        lastReportTime = millis();
-        float mmX = currentStepsX / cfg.stepsPerMmX; 
-        float mmY = currentStepsY / cfg.stepsPerMmY;
-        float mmZ = currentStepsZ / cfg.stepsPerMmZ;
-        String statusStr = "<Status:" + getStateName() +
-                   "|Time=" + String(millis()) +
-                   "|Pos:X=" + String(mmX, 2) + 
-                   ",Y=" + String(mmY, 2) + 
-                   ",Z=" + String(mmZ, 2) + 
-                   "|Hom:" + String(isHomed ? "1" : "0") + 
-                   "|Line=" + String(currentExecutingLineNum) + ">";
-        Serial.println(statusStr); sendToWiFiClient(statusStr);
+    // 1. ПРОВЕРКА ТАЙМЕРА: Заходим внутрь строго с шагом statusInterval (в обоих режимах)
+    if (millis() - lastReportTime < (unsigned long)cfg.statusInterval) {
+        return; 
+    }
+    lastReportTime = millis(); // Сбрасываем таймер на следующий шаг
+
+    // 2. РАСЧЕТ ТЕКУЩИХ КООРДИНАТ ДЕТАЛИ (WCS)
+    float mmX = ((float)currentStepsX / cfg.stepsPerMmX) - cfg.wcsOffsetX;
+    float mmY = ((float)currentStepsY / cfg.stepsPerMmY) - cfg.wcsOffsetY;
+    float mmZ = ((float)currentStepsZ / cfg.stepsPerMmZ) - cfg.wcsOffsetZ;
+
+    // Сборка строки телеметрии
+    String currentStatusStr = "<Status:" + getStateName() + 
+                              //"|Time=" + String(millis()) +
+                              "|Pos:X=" + String(mmX, 2) + 
+                              ",Y=" + String(mmY, 2) + 
+                              ",Z=" + String(mmZ, 2) + 
+                              "|Hom:" + String(isHomed ? "1" : "0") + 
+                              "|Line=" + String(currentExecutingLineNum) + ">";
+
+    // 3. ФИЛЬТРАЦИЯ ОТПРАВКИ
+    bool needToSend = false;
+
+    if (!cfg.sendOnlyOnChange) {
+        // Режим А: Флаг выключен — шлем всегда на каждом тике таймера
+        needToSend = true;
+    } 
+    else if (currentStatusStr != lastSentStatusStr) {
+        // Режим Б: Флаг включен — шлем на тике таймера ТОЛЬКО если данные изменились
+        needToSend = true;
+    }
+
+    // 4. ФИЗИЧЕСКАЯ ОТПРАВКА В ПОРТЫ
+    if (needToSend) {
+        Serial.println(currentStatusStr);
+        sendToWiFiClient(currentStatusStr);
+        lastSentStatusStr = currentStatusStr; // Запоминаем последний отправленный пакет
     }
 }

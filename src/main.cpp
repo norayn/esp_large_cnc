@@ -32,6 +32,9 @@ void setup() {
     pinMode(ENDSTOPS_PIN, INPUT_PULLUP);
 
     Serial.begin(115200);
+    Serial.setTxBufferSize(2560); 
+
+    // Порт для лазера ESP32-CAM (длина строк малая, оставляем дефолтным)
     Serial2.begin(115200, SERIAL_8N1, CAM_RX2_PIN, CAM_TX2_PIN);
 
     // Инициализация аппаратного таймера (100 кГц)

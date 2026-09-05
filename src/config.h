@@ -3,56 +3,62 @@
 
 #include <Arduino.h>
 
+// ============================================================================
+// ЦЕНТРАЛЬНЫЙ ОПИСАТЕЛЬ КОНФИГУРАЦИИ (ДОБАВЛЯТЬ НОВЫЕ НАСТРОЙКИ СТРОГО СЮДА!)
+// Формат: X(тип, имя_в_коде, ключ_eeprom, дефолт)
+// ============================================================================
+#define CONFIG_FIELDS \
+    X(float, stepsPerMmX,      "stepsX",    100.0f)  \
+    X(float, stepsPerMmY,      "stepsY",    400.0f)  \
+    X(float, stepsPerMmZ,      "stepsZ",    400.0f)  \
+    X(float, defaultFeedRate,   "defFeed",   600.0f)  \
+    X(float, rapidFeedRate,     "rapFeed",   2000.0f) \
+    X(float, maxAcceleration,   "accel",     150.0f)  \
+    X(float, minVectorSpeed,    "minSpeed",  2.0f)    \
+    X(float, laserGridStep,     "lGrid",     20.0f)   \
+    X(int,   laserMapSize,      "lSize",     201)     \
+    X(int,   pwmFrequency,      "pwmFreq",   5000)    \
+    X(int,   pwmResolutionBits, "pwmRes",    10)      \
+    X(float, minX,              "minX",      0.0f)    \
+    X(float, maxX,              "maxX",      4000.0f) \
+    X(float, minY,              "minY",      0.0f)    \
+    X(float, maxY,              "maxY",      500.0f)  \
+    \
+    X(float, minZ,              "minZ",      -200.0f) \
+    X(float, maxZ,              "maxZ",      0.0f)    \
+    X(bool,  allowJogBeforeHoming,"jogBefore",true)   \
+    X(float, feedMultiplier,    "feedMult",  1.0f)    \
+    X(bool,  isAlignmentActive, "alignAct",  false)   \
+    X(float, slopeY,            "slopeY",    0.0f)    \
+    X(float, slopeZ,            "slopeZ",    0.0f)    \
+    X(float, pointA_x,          "ptAx",      0.0f)    \
+    X(float, pointA_y,          "ptAy",      0.0f)    \
+    X(float, pointA_z,          "ptAz",      0.0f)    \
+    X(float, pointB_x,          "ptBx",      0.0f)    \
+    X(float, pointB_y,          "ptBy",      0.0f)    \
+    X(float, pointB_z,          "ptAz",      0.0f)    \
+    \
+    X(float, wcsOffsetX,        "wcsX",      0.0f)    \
+    X(float, wcsOffsetY,        "wcsY",      0.0f)    \
+    X(float, wcsOffsetZ,        "wcsZ",      0.0f)    \
+    X(int,   lastExecutedLine,  "lastLine",  0)       \
+    \
+    X(int,   statusInterval,    "statInt",   1000)    \
+    X(bool,  sendOnlyOnChange,  "sendChg",   false)
+
+// Автоматическая генерация структуры MachineConfig на основе макроса
 struct MachineConfig {
-    float stepsPerMmX;
-    float stepsPerMmY;
-    float stepsPerMmZ;
-
-    float defaultFeedRate;  
-    float rapidFeedRate;    
-    float maxAcceleration;  
-    float minVectorSpeed;   
-
-    float laserGridStep;    
-    int   laserMapSize;     
-
-    int pwmFrequency;       
-    int pwmResolutionBits;  
-
-    float minX, maxX; 
-    float minY, maxY; 
-    float minZ, maxZ; 
-
-    bool allowJogBeforeHoming; 
-
-    float wcsOffsetX; 
-    float wcsOffsetY;
-    float wcsOffsetZ;
-
-    bool  isAlignmentActive;
-    float slopeY;
-    float slopeZ;
-    float pointA_x, pointA_y, pointA_z; // Сохраняем и сами опорные точки для контроля
-    float pointB_x, pointB_y, pointB_z;
-
-    int lastExecutedLine; // НОВОЕ: Сюда пишется номер строки для восстановления при сбое
-    
-    volatile float feedMultiplier; 
+#define X(type, name, eeprom_key, default_val) type name;
+    CONFIG_FIELDS
+#undef X
 };
 
 extern MachineConfig cfg;
 
-extern volatile uint16_t currentExecutingLineNum; // Номер строки, которая пилится прямо сейчас
-
-// Инициализация и чтение памяти (Вызывается один раз в main.cpp)
 void setupAndLoadConfig(); 
-
-// Сохранение текущих координат WCS (Вызывается из gcode_program при выставлении нуля)
 void saveWcsToEEPROM();
-
 void saveAlignmentToEEPROM();
-
-// ЦЕНТРАЛЬНЫЙ ОБРАБОТЧИК НАСТРОЕК (Парсит и отвечает модулю связи)
+void saveConfigToEEPROM();
 String handleConfigCommand(String cmd);
 
 #endif
