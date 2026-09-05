@@ -76,7 +76,10 @@ void loop() {
     }
 
     // Очередь автоматической программы G-кода из ОЗУ
-    if (currentMachineState == STATE_RUNNING && !isVectorMoving) {
-        executeNextProgramStep(); 
+    if (currentMachineState == STATE_RUNNING) {
+        // Берем следующий шаг программы из ОЗУ только если физические буферы пусты
+        if (bufferTail == bufferHead && !nextSeg.hasNewData && !isVectorMoving) {
+            executeNextProgramStep(); 
+        }
     }
 }

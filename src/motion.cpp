@@ -27,8 +27,8 @@ struct StepCmd {
 
 // Убираем volatile со всего массива, оставляем атомарными только указатели
 static StepCmd stepRingBuffer[STEP_BUFFER_SIZE];
-static volatile uint32_t bufferHead = 0; 
-static volatile uint32_t bufferTail = 0; 
+volatile uint32_t bufferHead = 0; 
+volatile uint32_t bufferTail = 0; 
 
 // Переменные плавного изменения скорости
 static float targetMultiplier = 1.0f;
@@ -38,11 +38,7 @@ const unsigned long FADING_DURATION = 300; // Плавный стоп/разго
 // Глобальная переменная для ползунка скорости из Python (определена в motion.h)
 float pythonFeedrateOverride = 1.0f;
 
-struct InputSegment {
-    float x, y, z, f, a;
-    volatile bool hasNewData;
-};
-static volatile InputSegment nextSeg = {0, 0, 0, 0, 0, false};
+volatile InputSegment nextSeg = {0, 0, 0, 0, 0, false};
 
 void initMotion() {
     isVectorMoving = false;
@@ -115,7 +111,6 @@ void motionTask(void * parameter) {
             if (bufferTail == bufferHead) {
                 if (isVectorMoving) {
                     isVectorMoving = false;
-                    changeState(STATE_IDLE); // Станок перейдет в IDLE строго по факту остановки моторов!
                 }
             }
             vTaskDelay(pdMS_TO_TICKS(1)); 

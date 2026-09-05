@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-#define MAX_COMMANDS_BUFFER 10000 
+#define MAX_COMMANDS_BUFFER  3000 
 
 // Компактная бинарная ЧПУ-команда (13 байт)
 struct __attribute__((packed)) BinaryCommand {
@@ -23,7 +23,7 @@ struct WorkCoordinateSystem {
 };
 
 // Глобальные переменные программы
-extern BinaryCommand* gcodeBuffer;
+extern BinaryCommand gcodeBuffer[MAX_COMMANDS_BUFFER];
 extern int totalLoadedCommands;  
 extern int currentCommandIndex;  
 extern WorkCoordinateSystem wcsOffset; // Текущие смещения нуля детали

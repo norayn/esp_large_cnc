@@ -19,6 +19,10 @@ struct VectorSegment {
     float minTicksPerSec; 
     float accelRate;      
 };
+struct InputSegment {
+    float x, y, z, f, a;
+    volatile bool hasNewData;
+};
 
 extern volatile long currentStepsX;
 extern volatile long currentStepsY;
@@ -26,6 +30,10 @@ extern volatile long currentStepsZ;
 extern volatile bool isVectorMoving;
 
 extern float pythonFeedrateOverride; // Переменная множителя скорости от ползунка ПК
+
+extern volatile uint32_t bufferHead;
+extern volatile uint32_t bufferTail;
+extern volatile InputSegment nextSeg; 
 
 void initMotion();
 void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Min, float accelMM_Sec2);

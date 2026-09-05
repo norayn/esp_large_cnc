@@ -38,31 +38,34 @@ String processIncomingCommand(String cmd) {
     cmd.trim();
     if (cmd.length() == 0) return "";
 
-    bool commandRecognized = false;
+    // 1. Глобальные аварийные команды (работают всегда)
+    if (handleGlobalCommands(cmd)) return "ok";
 
-    // 1. Проверяем глобальные команды безопасности
-    if (handleGlobalCommands(cmd)) {
-        commandRecognized = true;
-    }
-    // 2. Проверяем бинарные кадры G-кода
-    else if (cmd.startsWith("B:")) {
-        commandRecognized = handleBinaryCommandPacket(cmd);
-    }
-    // 3. Распределяем по текущему состоянию конечного автомата
-    else if (currentMachineState == STATE_IDLE) {
-        commandRecognized = handleIdleCommands(cmd);
-    } 
-    else if (currentMachineState == STATE_MAP_TRANSFER) {
-        commandRecognized = handleMapTransferCommands(cmd);
+    // 2. Если мы НАХОДИМСЯ в режиме загрузки G-кода
+    if (currentMachineState == STATE_GCODE_UPLOAD) {
+        if (cmd.startsWith("B:")) {
+            return handleBinaryCommandPacket(cmd) ? "ok" : "ERROR: Add to RAM buffer failed";
+        }
+        if (cmd.startsWith("GCODE_UPLOAD_END")) {
+            changeState(STATE_IDLE); // Выходим из режима загрузки
+            return "STATUS: Upload complete. Loaded " + String(totalLoadedCommands) + " commands.\nok"; 
+            // Возвращаем и статус, и финальный ok одной строкой!
+        }
     }
 
-    // Возвращаем результат обработки
-    if (commandRecognized) {
-        return "ok";
-    } else {
-        return "ERROR: Unknown or blocked command: " + cmd;
+    // 3. Если мы в режиме ожидания
+    if (currentMachineState == STATE_IDLE) {
+        if (handleIdleCommands(cmd)) return "ok";
     }
+
+    // 4. Передача лазерных карт
+    if (currentMachineState == STATE_MAP_TRANSFER) {
+        if (handleMapTransferCommands(cmd)) return "ok";
+    }
+
+    return "ERROR: Unknown or blocked command: " + cmd;
 }
+
 
 // ГЛАВНЫЙ СЕТЕВОЙ ЦИКЛ (Теперь он чистый и читаемый)
 void updateWiFiCommunication() {
@@ -75,42 +78,41 @@ void updateWiFiCommunication() {
 
     while (tcpClient.available() > 0) {
         char c = tcpClient.read();
+        
+        // Читаем строго до разделителей кадра ЧПУ
         if (c == '\n' || c == '\r') {
+            wifiInputBuffer.trim();
+            
             if (wifiInputBuffer.length() > 0) {
-                wifiInputBuffer.trim();
-
-                bool commandRecognized = false;
-
-                // 1. Проверяем глобальные команды
-                if (handleGlobalCommands(wifiInputBuffer)) {
-                    commandRecognized = true;
-                }
-                // 2. Проверяем бинарные кадры
-                else if (wifiInputBuffer.startsWith("B:")) {
-                    commandRecognized = handleBinaryCommandPacket(wifiInputBuffer);
-                }
-                // 3. Проверяем команды состояний
-                else if (currentMachineState == STATE_IDLE) {
-                    commandRecognized = handleIdleCommands(wifiInputBuffer);
-                } 
-                else if (currentMachineState == STATE_MAP_TRANSFER) {
-                    commandRecognized = handleMapTransferCommands(wifiInputBuffer);
-                }
-
-                // Отвечаем "ok" только если команда валидна, иначе шлем ошибку
-                if (commandRecognized) {
-                    sendToWiFiClient("ok");
-                } else {
-                    sendToWiFiClient("ERROR: Unknown or blocked command: " + wifiInputBuffer);
+                // МГНОВЕННО скармливаем строку единому диспетчеру ЧПУ!
+                // Он сам знает все стейты, бинарные пакеты и команды
+                String response = processIncomingCommand(wifiInputBuffer);
+                
+                if (response.length() > 0) {
+                    sendToWiFiClient(response); // Шлем "ok" или "ERROR" Питону
                 }
                 
-                wifiInputBuffer = "";
+                wifiInputBuffer = ""; // ЖЕСТКАЯ ОЧИСТКА БУФЕРА СРАЗУ ПОСЛЕ ОТВЕТА!
             }
         } else {
             wifiInputBuffer += c;
         }
     }
+
+    // ЗАЩИТА ОТ ОБРЫВА СТРОКИ: Если Питон прислал команду без \n в конце пакета,
+    // и буфер сокета опустел, принудительно обрабатываем накопленный остаток
+    if (wifiInputBuffer.length() > 0 && tcpClient.available() == 0) {
+        wifiInputBuffer.trim();
+        if (wifiInputBuffer.length() > 0) {
+            String response = processIncomingCommand(wifiInputBuffer);
+            if (response.length() > 0) {
+                sendToWiFiClient(response);
+            }
+        }
+        wifiInputBuffer = ""; // Обнуляем хвост намертво
+    }
 }
+
 
 // ==========================================================
 // РЕАЛИЗАЦИЯ ИЗОЛИРОВАННЫХ МОДУЛЕЙ ОБРАБОТКИ
@@ -198,7 +200,12 @@ static bool handleIdleCommands(const String& cmd) {
         extern void saveAlignmentToEEPROM(); saveAlignmentToEEPROM();
         return true;
     }
-    if (cmd == "GCODE_UPLOAD_START") { clearGCodeBuffer(); sendToWiFiClient("STATUS: Ready"); return true; }
+    if (cmd == "GCODE_UPLOAD_START") {
+        clearGCodeBuffer();
+        changeState(STATE_GCODE_UPLOAD); // Жестко переключаем автомат в режим приема G-кода!
+        sendToWiFiClient("STATUS: Ready");
+        return true;
+    }
     if (cmd == "START_PROGRAM") {
         if (totalLoadedCommands > 0) { changeState(STATE_RUNNING); executeNextProgramStep(); }
         return true;
@@ -256,21 +263,38 @@ static bool handleMapTransferCommands(const String& cmd) {
 
 // 4. Прием и декомпозиция бинарных кадров G-кода (Универсально, доступно при заливке)
 // Вызывается из основного цикла, если пришел маркер "B:"
-static bool handleBinaryCommandPacket(const String& cmd) {
-    String data = cmd.substring(2); 
-    int idx1 = data.indexOf(';'); int idx2 = data.indexOf(';', idx1 + 1);
-    int idx3 = data.indexOf(';', idx2 + 1); int idx4 = data.indexOf(';', idx3 + 1);
-    int idx5 = data.indexOf(';', idx4 + 1);
+bool handleBinaryCommandPacket(const String& cmd) {
+    int firstColon = cmd.indexOf(':');
+    if (firstColon == -1) return false;
     
-    if (idx1 != -1 && idx2 != -1 && idx3 != -1 && idx4 != -1 && idx5 != -1) {
-        uint8_t type  = data.substring(0, idx1).toInt();
-        uint16_t line = data.substring(idx1 + 1, idx2).toInt();
-        float x       = data.substring(idx2 + 1, idx3).toFloat();
-        float y       = data.substring(idx3 + 1, idx4).toFloat();
-        float z       = data.substring(idx4 + 1, idx5).toFloat();
-        float f       = data.substring(idx5 + 1).toFloat();
-        
-        return addBinaryCommand(type, line, x, y, z, f); // вернет true, если успешно легло в RAM
+    String data = cmd.substring(firstColon + 1);
+    
+    int semicolons[5];
+    int currentIdx = 0;
+    int pos = 0;
+    
+    while ((pos = data.indexOf(';', pos)) != -1 && currentIdx < 5) {
+        semicolons[currentIdx++] = pos;
+        pos++;
     }
-    return false;
+    
+    if (currentIdx < 5) return false;
+    
+    uint8_t type  = data.substring(0, semicolons[0]).toInt();
+    uint16_t line = data.substring(semicolons[0] + 1, semicolons[1]).toInt();
+    float x       = data.substring(semicolons[1] + 1, semicolons[2]).toFloat();
+    float y       = data.substring(semicolons[2] + 1, semicolons[3]).toFloat();
+    float z       = data.substring(semicolons[3] + 1, semicolons[4]).toFloat();
+    float f       = data.substring(semicolons[4] + 1).toFloat();
+    
+    // Просто вызывем функцию, память уже выделена на родине в clearGCodeBuffer()!
+    bool success = addBinaryCommand(type, line, x, y, z, f);
+    
+    if (!success) {
+        Serial.printf("PARSER_ERROR: addBinaryCommand failed! Total: %d, Max: %d\n", totalLoadedCommands, MAX_COMMANDS_BUFFER);
+    }
+    
+    return success;
 }
+
+

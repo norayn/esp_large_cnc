@@ -4,7 +4,7 @@
 #include "pinout.h"
 #include "state_manager.h"
 
-BinaryCommand* gcodeBuffer = NULL;
+BinaryCommand gcodeBuffer[MAX_COMMANDS_BUFFER];
 int totalLoadedCommands = 0;
 int currentCommandIndex = 0;
 WorkCoordinateSystem wcsOffset = {0.0, 0.0, 0.0};
@@ -22,7 +22,6 @@ static float slopeY = 0.0;
 static float slopeZ = 0.0;
 
 void initGCodeModule() {
-    gcodeBuffer = (BinaryCommand*)malloc(MAX_COMMANDS_BUFFER * sizeof(BinaryCommand));
     clearGCodeBuffer();
 
     // Восстанавливаем сохраненные из EEPROM нули детали G54
@@ -41,13 +40,14 @@ void initGCodeModule() {
 void clearGCodeBuffer() {
     totalLoadedCommands = 0;
     currentCommandIndex = 0;
-    if (gcodeBuffer != NULL) {
-        memset(gcodeBuffer, 0, MAX_COMMANDS_BUFFER * sizeof(BinaryCommand));
-    }
+    
+    memset(gcodeBuffer, 0, sizeof(gcodeBuffer));
 }
 
+
 bool addBinaryCommand(uint8_t type, uint16_t line, float x, float y, float z, float f) {
-    if (gcodeBuffer == NULL || totalLoadedCommands >= MAX_COMMANDS_BUFFER) return false;
+    if (totalLoadedCommands >= MAX_COMMANDS_BUFFER) return false;
+    
     gcodeBuffer[totalLoadedCommands] = { type, line, x, y, z, f };
     totalLoadedCommands++;
     return true;
@@ -85,9 +85,9 @@ void executeNextProgramStep() {
     }
 
     if (currentCommandIndex >= totalLoadedCommands) {
-        isVectorMoving = false;
-        changeState(STATE_IDLE);
-        return; 
+        changeState(STATE_IDLE); // Вот теперь станок официально и безопасно завершил работу!
+        Serial.println("STATUS: Program finished successfully.");
+        return;
     }
 
     BinaryCommand cmd = gcodeBuffer[currentCommandIndex];

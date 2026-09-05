@@ -12,7 +12,8 @@ enum MachineState {
     STATE_MAP_TRANSFER,  
     STATE_RUNNING,       
     STATE_HOMING,        
-    STATE_HOLD           
+    STATE_HOLD,
+    STATE_GCODE_UPLOAD           
 };
 
 extern volatile bool isHomed;

@@ -28,6 +28,7 @@ String getStateName() {
         case STATE_RUNNING:      return "RUNNING";
         case STATE_HOMING:       return "HOMING";
         case STATE_HOLD:         return "HOLD";
+        case STATE_GCODE_UPLOAD: return "GCODE_UPLOAD";
         default:                 return "UNKNOWN";
     }
 }
@@ -57,6 +58,9 @@ void changeState(MachineState newState) {
             break;
         case STATE_IDLE:
             digitalWrite(MOTORS_ENABLE, LOW); 
+            break;
+        case STATE_GCODE_UPLOAD:
+            isVectorMoving = false;
             break;
         default:
             break;
