@@ -204,3 +204,12 @@ void deactivateAlignmentExternal() {
     cfg.isAlignmentActive = false;
     saveAlignmentToEEPROM();
 }
+
+void startProgramExecution() {
+    plannerStepsX = currentStepsX;
+    plannerStepsY = currentStepsY;
+    plannerStepsZ = currentStepsZ;
+
+    changeState(STATE_RUNNING);
+    executeNextProgramStep();
+}

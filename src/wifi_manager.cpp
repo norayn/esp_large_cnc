@@ -207,7 +207,7 @@ static bool handleIdleCommands(const String& cmd) {
         return true;
     }
     if (cmd == "START_PROGRAM") {
-        if (totalLoadedCommands > 0) { changeState(STATE_RUNNING); executeNextProgramStep(); }
+        if (totalLoadedCommands > 0) { startProgramExecution(); }
         return true;
     }
     if (cmd.startsWith("START_FROM_LINE:")) {
@@ -216,7 +216,7 @@ static bool handleIdleCommands(const String& cmd) {
         for (int i = 0; i < totalLoadedCommands; i++) {
             if (gcodeBuffer[i].lineNum == targetLine) { currentCommandIndex = i; lineFound = true; break; }
         }
-        if (lineFound) { changeState(STATE_RUNNING); executeNextProgramStep(); }
+        if (lineFound) { startProgramExecution(); }
         return true;
     }
     if (cmd == "GET_LAST_ABORTED_LINE") { sendToWiFiClient("LAST_LINE:" + String(cfg.lastExecutedLine)); return true; }

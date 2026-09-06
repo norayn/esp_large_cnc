@@ -28,6 +28,9 @@ extern volatile long currentStepsX;
 extern volatile long currentStepsY;
 extern volatile long currentStepsZ;
 extern volatile bool isVectorMoving;
+extern volatile long plannerStepsX;
+extern volatile long plannerStepsY;
+extern volatile long plannerStepsZ;
 
 extern float pythonFeedrateOverride; // Переменная множителя скорости от ползунка ПК
 

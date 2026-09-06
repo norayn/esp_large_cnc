@@ -57,4 +57,6 @@ void executeNextProgramStep();
 // Обработчик одиночных ручных команд (JOG)
 void processSingleManualCommand(String line);
 
+void startProgramExecution();
+
 #endif

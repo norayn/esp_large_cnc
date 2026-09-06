@@ -12,6 +12,10 @@ volatile bool isVectorMoving = false;
 
 static CorrectionPoint curvatureMap[250]; 
 
+volatile long plannerStepsX = 0;
+volatile long plannerStepsY = 0;
+volatile long plannerStepsZ = 0;
+
 // --- КОЛЬЦЕВОЙ БУФЕР ШАГОВ ---
 #define STEP_BUFFER_SIZE 4096 // Увеличим буфер для стабильности
 
@@ -43,6 +47,7 @@ volatile InputSegment nextSeg = {0, 0, 0, 0, 0, false};
 void initMotion() {
     isVectorMoving = false;
     currentStepsX = 0; currentStepsY = 0; currentStepsZ = 0;
+    plannerStepsX = 0; plannerStepsY = 0; plannerStepsZ = 0; 
     bufferHead = 0;
     bufferTail = 0;
     
@@ -118,9 +123,9 @@ void motionTask(void * parameter) {
         }
 
         // Синхронизируем виртуальный счетчик с реальным положением ПЕРЕД началом нового кадра!
-        localStepsX = currentStepsX;
-        localStepsY = currentStepsY;
-        localStepsZ = currentStepsZ;
+        localStepsX = plannerStepsX;
+        localStepsY = plannerStepsY;
+        localStepsZ = plannerStepsZ;
 
         float nX = nextSeg.x; float nY = nextSeg.y; float nZ = nextSeg.z;
         float feed = nextSeg.f; float accel = nextSeg.a;
@@ -136,12 +141,18 @@ void motionTask(void * parameter) {
         float realMachineY = nY + corr.y_offset;
         float realMachineZ = nZ + corr.z_offset;
 
+        // Вычисляем дельты и точную длину вектора строго от идеальной математической базы!
         float dx = nX - ((float)localStepsX / cfg.stepsPerMmX);
         float dy = realMachineY - ((float)localStepsY / cfg.stepsPerMmY);
         float dz = realMachineZ - ((float)localStepsZ / cfg.stepsPerMmZ);
         float totalLength = sqrt(dx*dx + dy*dy + dz*dz);
 
         if (totalLength < 0.001f) { continue; }
+
+        // Точные, эталонные цели кадра в целых шагах, которые требует УП
+        long finalTargetStepsX = nX * cfg.stepsPerMmX;
+        long finalTargetStepsY = realMachineY * cfg.stepsPerMmY;
+        long finalTargetStepsZ = realMachineZ * cfg.stepsPerMmZ;
 
         float Kx = fabs(dx) / totalLength; int dirX = (dx >= 0) ? 1 : -1;
         float Ky = fabs(dy) / totalLength; int dirY = (dy >= 0) ? 1 : -1;
@@ -218,20 +229,68 @@ void motionTask(void * parameter) {
             }
 
             StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
-            bool stateChanged = false;
 
             // За один такт времени (10 мкс) мы делаем максимум 1 дискретный шаг (через IF)
-            if (localStepsX != tStepsX) { cmd.stepX = 1; cmd.dirX = (tStepsX > localStepsX) ? 1 : 0; localStepsX += (tStepsX > localStepsX) ? 1 : -1; stateChanged = true; }
-            if (localStepsY != tStepsY) { cmd.stepY = 1; cmd.dirY = (tStepsY > localStepsY) ? 1 : 0; localStepsY += (tStepsY > localStepsY) ? 1 : -1; stateChanged = true; }
-            if (localStepsZ != tStepsZ) { cmd.stepZ = 1; cmd.dirZ = (tStepsZ > localStepsZ) ? 1 : 0; localStepsZ += (tStepsZ > localStepsZ) ? 1 : -1; stateChanged = true; }
+            if (localStepsX != tStepsX) { cmd.stepX = 1; cmd.dirX = (tStepsX > localStepsX) ? 1 : 0; localStepsX += (tStepsX > localStepsX) ? 1 : -1; }
+            if (localStepsY != tStepsY) { cmd.stepY = 1; cmd.dirY = (tStepsY > localStepsY) ? 1 : 0; localStepsY += (tStepsY > localStepsY) ? 1 : -1; }
+            if (localStepsZ != tStepsZ) { cmd.stepZ = 1; cmd.dirZ = (tStepsZ > localStepsZ) ? 1 : 0; localStepsZ += (tStepsZ > localStepsZ) ? 1 : -1; }
+            cmd.valid = 1;
+
+            stepRingBuffer[bufferHead] = cmd;
+            bufferHead = nextHead; 
+        }
+
+        // ====================================================================
+        // ОТЛАДОЧНАЯ ЖЕСТКАЯ ФИНАЛИЗАЦИЯ: Дотягиваем остаток кадра до микрона
+        // ====================================================================
+        // Переменные-счетчики для лога отладки
+        int injectedX = 0;
+        int injectedY = 0;
+        int injectedZ = 0;
+
+        while (localStepsX != finalTargetStepsX || localStepsY != finalTargetStepsY || localStepsZ != finalTargetStepsZ) {
+            uint32_t nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
+            while (nextHead == bufferTail) { vTaskDelay(pdMS_TO_TICKS(1)); }
+
+            StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
+            
+            if (localStepsX != finalTargetStepsX) { 
+                cmd.stepX = 1; 
+                cmd.dirX = (finalTargetStepsX > localStepsX) ? 1 : 0; 
+                localStepsX += (finalTargetStepsX > localStepsX) ? 1 : -1; 
+                injectedX++; // Фиксируем докинутый шаг X
+            }
+            if (localStepsY != finalTargetStepsY) { 
+                cmd.stepY = 1; 
+                cmd.dirY = (finalTargetStepsY > localStepsY) ? 1 : 0; 
+                localStepsY += (finalTargetStepsY > localStepsY) ? 1 : -1; 
+                injectedY++; // Фиксируем докинутый шаг Y
+            }
+            if (localStepsZ != finalTargetStepsZ) { 
+                cmd.stepZ = 1; 
+                cmd.dirZ = (finalTargetStepsZ > localStepsZ) ? 1 : 0; 
+                localStepsZ += (finalTargetStepsZ > localStepsZ) ? 1 : -1; 
+                injectedZ++; // Фиксируем докинутый шаг Z
+            }
             
             cmd.valid = 1;
             stepRingBuffer[bufferHead] = cmd;
             bufferHead = nextHead; 
         }
 
+        // ВЫВОД В ЛОГ: Выводим отчет, только если реально пришлось что-то довыравнивать
+        if (injectedX > 0 || injectedY > 0 || injectedZ > 0) {
+            Serial.printf("DEBUG_ALIGN [Line %d]: Injected compensations: DX=%d, DY=%d, DZ=%d steps.\n", 
+                          777, injectedX, injectedY, injectedZ);
+        }
+
+        // ПЕРЕДАЕМ ИДЕАЛЬНУЮ БАЗУ СЛЕДУЮЩЕМУ КАДРУ
+        plannerStepsX = localStepsX;
+        plannerStepsY = localStepsY;
+        plannerStepsZ = localStepsZ;
+
         vTaskDelay(pdMS_TO_TICKS(1));
-    }
+    } // Конец главного цикла while(true)
 }
 
 
@@ -350,6 +409,7 @@ void runFullHoming() {
         return; 
     }
 
+    plannerStepsX = 0; plannerStepsY = 0; plannerStepsZ = 0;
     isHomed = true;
 }
 
