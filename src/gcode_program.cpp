@@ -45,10 +45,10 @@ void clearGCodeBuffer() {
 }
 
 
-bool addBinaryCommand(uint8_t type, uint16_t line, float x, float y, float z, float f) {
+bool addBinaryCommand(uint8_t type, uint16_t line, float x, float y, float z, float f, float v_start, float v_end) {
     if (totalLoadedCommands >= MAX_COMMANDS_BUFFER) return false;
     
-    gcodeBuffer[totalLoadedCommands] = { type, line, x, y, z, f };
+    gcodeBuffer[totalLoadedCommands] = { type, line, x, y, z, f, v_start, v_end };
     totalLoadedCommands++;
     return true;
 }
@@ -84,9 +84,13 @@ void executeNextProgramStep() {
         return; 
     }
 
+    // Если все кадры из статического ОЗУ-буфера полностью закончились
     if (currentCommandIndex >= totalLoadedCommands) {
-        changeState(STATE_IDLE); // Вот теперь станок официально и безопасно завершил работу!
-        Serial.println("STATUS: Program finished successfully.");
+        // Ждем, пока физическое движение полностью прекратится на столе
+        if (!isPlannerBusy) {
+            changeState(STATE_IDLE); 
+            Serial.println("STATUS: Program finished successfully.");
+        }
         return;
     }
 
@@ -111,8 +115,11 @@ void executeNextProgramStep() {
             machineZ += deltaX_from_A * slopeZ;
         }
 
-        // Отправляем результирующий чистый вектор в физический планировщик motion
-        prepareVectorSegment(machineX, machineY, machineZ, cmd.f, cfg.maxAcceleration);
+        
+        // Передаем 7 параметров. Скорости v_start и v_end уже лежат в структуре cmd,
+        // так как их рассчитал и прислал Look-Ahead модуль на Python!
+        prepareVectorSegment(machineX, machineY, machineZ, cmd.f, cfg.maxAcceleration, cmd.v_start, cmd.v_end);
+
 
         // Если включен покадровый режим, взводим флаг ожидания для СЛЕДУЮЩЕГО кадра
         if (isSingleBlockMode) {
@@ -149,11 +156,13 @@ void processSingleManualCommand(String line) {
     float z = (line.indexOf('Z') != -1) ? line.substring(line.indexOf('Z')+1).toFloat() : (currentStepsZ / cfg.stepsPerMmZ) - wcsOffset.z;
     float f = (line.indexOf('F') != -1) ? line.substring(line.indexOf('F')+1).toFloat() : cfg.defaultFeedRate;
 
+    float v_jog_base = cfg.minVectorSpeed; 
+
     if (type == 0 || type == 1) {
         float machineX = x + wcsOffset.x;
         float machineY = y + wcsOffset.y;
         float machineZ = z + wcsOffset.z;
-        prepareVectorSegment(machineX, machineY, machineZ, f, cfg.maxAcceleration);
+        prepareVectorSegment(machineX, machineY, machineZ, f, cfg.maxAcceleration, v_jog_base, v_jog_base);
     }
 }
 
@@ -206,10 +215,15 @@ void deactivateAlignmentExternal() {
 }
 
 void startProgramExecution() {
+    // ЖЕСТКИЙ HANDSHAKE БАЗЫ: Перед запуском первого кадра УП 
+    // приравниваем виртуальные оси планировщика к реальному положению моторов на столе
     plannerStepsX = currentStepsX;
     plannerStepsY = currentStepsY;
     plannerStepsZ = currentStepsZ;
 
+    currentCommandIndex = 0; // Сброс указателя на начало массива в ОЗУ
     changeState(STATE_RUNNING);
-    executeNextProgramStep();
+    
+    executeNextProgramStep(); // Вызываем первый шаг
 }
+

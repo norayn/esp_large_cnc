@@ -264,37 +264,39 @@ static bool handleMapTransferCommands(const String& cmd) {
 // 4. Прием и декомпозиция бинарных кадров G-кода (Универсально, доступно при заливке)
 // Вызывается из основного цикла, если пришел маркер "B:"
 bool handleBinaryCommandPacket(const String& cmd) {
+    // Входной формат от Python теперь имеет вид: "B:TYPE;LINE_NUM;X;Y;Z;F_MAX;V_START;V_END"
     int firstColon = cmd.indexOf(':');
     if (firstColon == -1) return false;
     
     String data = cmd.substring(firstColon + 1);
     
-    int semicolons[5];
+    // Массив для хранения позиций семи разделителей ';'
+    int semicolons[7];
     int currentIdx = 0;
     int pos = 0;
     
-    while ((pos = data.indexOf(';', pos)) != -1 && currentIdx < 5) {
+    // Ищем ровно 7 разделителей
+    while ((pos = data.indexOf(';', pos)) != -1 && currentIdx < 7) {
         semicolons[currentIdx++] = pos;
         pos++;
     }
     
-    if (currentIdx < 5) return false;
+    // Защита: Если разделителей меньше 7 — пакет битый или старого формата
+    if (currentIdx < 7) return false;
     
+    // Извлекаем подстроки строго по найденным целочисленным маркерам
     uint8_t type  = data.substring(0, semicolons[0]).toInt();
     uint16_t line = data.substring(semicolons[0] + 1, semicolons[1]).toInt();
     float x       = data.substring(semicolons[1] + 1, semicolons[2]).toFloat();
     float y       = data.substring(semicolons[2] + 1, semicolons[3]).toFloat();
     float z       = data.substring(semicolons[3] + 1, semicolons[4]).toFloat();
-    float f       = data.substring(semicolons[4] + 1).toFloat();
+    float f       = data.substring(semicolons[4] + 1, semicolons[5]).toFloat();
     
-    // Просто вызывем функцию, память уже выделена на родине в clearGCodeBuffer()!
-    bool success = addBinaryCommand(type, line, x, y, z, f);
+    // НОВЫЕ ПОЛЯ: Забираем готовые Look-Ahead скорости (они передаются в мм/сек)
+    float v_start = data.substring(semicolons[5] + 1, semicolons[6]).toFloat();
+    float v_end   = data.substring(semicolons[6] + 1).toFloat();
     
-    if (!success) {
-        Serial.printf("PARSER_ERROR: addBinaryCommand failed! Total: %d, Max: %d\n", totalLoadedCommands, MAX_COMMANDS_BUFFER);
-    }
-    
-    return success;
+    // Передаем данные в функцию добавления в ОЗУ-массив станка.
+    // (Не забудьте обновить сигнатуру addBinaryCommand в gcode_program.cpp, чтобы она принимала v_start и v_end)
+    return addBinaryCommand(type, line, x, y, z, f, v_start, v_end);
 }
-
-

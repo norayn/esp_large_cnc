@@ -36,7 +36,7 @@ void runAutoCalibration() {
     initMotion(); 
     for (int i = 0; i < cfg.laserMapSize; i++) {
         float tX = i * cfg.laserGridStep;
-        prepareVectorSegment(tX, 0.0, 0.0, 400.0, cfg.maxAcceleration);
+        prepareVectorSegment(tX, 0.0, 0.0, 400.0, cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed);
         while (isVectorMoving) { delay(10); }
         delay(500); 
 

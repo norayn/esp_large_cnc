@@ -55,7 +55,7 @@ void runGeometryScan(float startX, float endX, float stepX, float feedRate) {
 
     for (int i = 0; i < stepsCount; i++) {
         // Командуем планировщику ехать в точку замера (Y и Z удерживаем в нулях)
-        prepareVectorSegment(currentX, 0.0f, 0.0f, feedRate, cfg.maxAcceleration);
+        prepareVectorSegment(currentX, 0.0f, 0.0f, feedRate, cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed);
         while (isVectorMoving) { delay(10); }
         
         delay(600); // Стабилизация пространственной фермы после остановки

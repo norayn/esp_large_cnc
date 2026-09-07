@@ -44,7 +44,14 @@
     X(int,   lastExecutedLine,  "lastLine",  0)       \
     \
     X(int,   statusInterval,    "statInt",   1000)    \
-    X(bool,  sendOnlyOnChange,  "sendChg",   false)
+    X(bool,  sendOnlyOnChange,  "sendChg",   false)   \
+    \
+    X(int,   homingDirX,        "homDirX",  -1)       \
+    X(int,   homingDirY,        "homDirY",  -1)       \
+    X(int,   homingDirZ,        "homDirZ",  1)        \
+    X(int,   pullOffX,          "pullOffX",  400)     \
+    X(int,   pullOffY,          "pullOffY",  800)     \
+    X(int,   pullOffZ,          "pullOffZ",  800)
 
 // Автоматическая генерация структуры MachineConfig на основе макроса
 struct MachineConfig {
