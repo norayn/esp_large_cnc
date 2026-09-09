@@ -70,7 +70,7 @@ void changeState(MachineState newState) {
 
 void checkHardwareSecurity() {
     // Аппаратная кнопка аварийной остановки (E-STOP) должна работать ВСЕГДА
-    if (digitalRead(ESTOP_PIN) == LOW) { // Предположим, LOW = нажата
+    if (digitalRead(ESTOP_PIN) == HIGH) { // Предположим, HIGH = нажата
         if (currentMachineState != STATE_ALARM) {
             changeState(STATE_ALARM);
             Serial.println("CRITICAL: E-STOP Button Pressed!");
