@@ -42,7 +42,7 @@ extern volatile InputSegment nextSeg;
 
 // Прототипы функций модуля движения
 void initMotion();
-void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Min, 
+void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec, 
                           float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec);
 void updateCurvaturePoint(int index, float y_off, float z_off);
 CorrectionPoint getCorrection(float currentX);

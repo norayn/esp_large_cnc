@@ -107,7 +107,7 @@ CorrectionPoint getCorrection(float currentX) {
 // СТРУКТУРНЫЙ БЛОК: НЕБЛОКИРУЮЩАЯ ПЕРЕДАЧА КАДРА МЕЖДУ ЯДРАМИ (Core 0)
 // ============================================================================
 
-void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Min, 
+void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec, 
                           float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec) {
     
     // Блокировка от затирания: ждем, пока Ядро 1 заберет предыдущий пакет
@@ -121,8 +121,8 @@ void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_M
     nextSeg.z = newZ;
     nextSeg.accel = accelMM_Sec2;
     
-    // Приводим подачу кадра из мм/минуту в мм/секунду для физических формул Ядра 1
-    nextSeg.v_frame = feedRateMM_Min / 60.0f; 
+    // Подача кадра  мм/секунду для физических формул Ядра 1
+    nextSeg.v_frame = feedRateMM_Sec; 
     
     // Принимаем готовые Look-Ahead скорости сопряжения от Python (они уже в мм/сек)
     nextSeg.v_start = vStartMM_Sec;         
