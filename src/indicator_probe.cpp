@@ -4,6 +4,7 @@
 #include "config.h"
 #include "wifi_manager.h"
 #include "state_manager.h"
+#include "gcode_program.h"
 
 void initIndicatorModule() {
     pinMode(INDICATOR_CLK, INPUT_PULLUP);
@@ -11,37 +12,49 @@ void initIndicatorModule() {
 }
 
 float readDialIndicator() {
-    unsigned long timeout = millis();
-    // Ждем начала пакета данных от индикатора (когда CLK упадет в LOW)
+    if (currentMachineState == STATE_ALARM) return -999.0f;
+
+    unsigned long startTime = millis();
+    // 1. Ожидание стартового падения CLK с защитой от Watchdog
     while (digitalRead(INDICATOR_CLK) == HIGH) {
-        if (millis() - timeout > 50) { 
-            return -999.0f; // Физически отключен (нет тактовых импульсов)
-        }
+        if (millis() - startTime > 50) return -999.0f;
+        delayMicroseconds(5); // Снимаем нагрузку с процессора
     }
 
     long value = 0;
     int sign = 1;
-    
-    // Китайский протокол: передается 24 бита данных
+
+    // Чтение 24-битного кадра данных
     for (int i = 0; i < 24; i++) {
-        // Ждем спада тактового импульса
-        while (digitalRead(INDICATOR_CLK) == HIGH);
-        
-        // Читаем бит данных в момент низкого уровня CLK
+        unsigned long uStart;
+
+        // 2. Ожидание перехода CLK в HIGH с таймаутом
+        uStart = micros();
+        while (digitalRead(INDICATOR_CLK) == LOW) {
+            if (micros() - uStart > 1000) return -999.0f; // Таймаут 1 мс (частота CLK обычно > 1 кГц)
+            delayMicroseconds(2);
+        }
+
+        // 3. Ожидание спада CLK в LOW с таймаутом (Защита от обрыва провода)
+        uStart = micros();
+        while (digitalRead(INDICATOR_CLK) == HIGH) {
+            if (micros() - uStart > 1000) return -999.0f; // Таймаут 1 мс
+            delayMicroseconds(2);
+        }
+
+        // Фиксация бита строго по спаду CLK
         if (digitalRead(INDICATOR_DATA) == HIGH) {
-            if (i == 20) sign = -1; // 21-й бит обычно отвечает за знак минус
-            else if (i < 20) {
+            if (i == 20) {
+                sign = -1; // 21-й бит определяет знак минуса
+            } else if (i < 20) {
                 value |= (1L << i);
             }
         }
-        // Ждем возврата CLK в HIGH
-        while (digitalRead(INDICATOR_CLK) == LOW);
     }
 
-    // Перевод попугаев индикатора в честные миллиметры (обычно 100 или 200 шагов на 1 мм)
-    float result = (float)value / 100.0f * sign;
-    return result;
+    return (float)value * sign / 100.0f;
 }
+
 
 void runGeometryScan(float startX, float endX, float stepX, float feedRate) {
     Serial.println("=== START GEOMETRY SCAN ===");
@@ -56,7 +69,11 @@ void runGeometryScan(float startX, float endX, float stepX, float feedRate) {
     for (int i = 0; i < stepsCount; i++) {
         // Командуем планировщику ехать в точку замера (Y и Z удерживаем в нулях)
         prepareVectorSegment(currentX, 0.0f, 0.0f, feedRate, cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed);
-        while (isVectorMoving) { delay(10); }
+        while (isPlannerBusy) {
+            checkHardwareSecurity();
+            if (currentMachineState == STATE_ALARM) return;
+            delay(10);
+        }
         
         delay(600); // Стабилизация пространственной фермы после остановки
 
@@ -71,6 +88,9 @@ void runGeometryScan(float startX, float endX, float stepX, float feedRate) {
         bool laserConnected = false;
 
         while (millis() - sWait < 1500) { // Таймаут 1.5 сек
+            checkHardwareSecurity();
+            if (currentMachineState == STATE_ALARM) return;
+            
             if (Serial2.available() > 0) {
                 char c = Serial2.read();
                 if (c == '\n' || c == '\r') {

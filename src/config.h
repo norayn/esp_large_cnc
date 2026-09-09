@@ -36,7 +36,7 @@
     X(float, pointA_z,          "ptAz",      0.0f)    \
     X(float, pointB_x,          "ptBx",      0.0f)    \
     X(float, pointB_y,          "ptBy",      0.0f)    \
-    X(float, pointB_z,          "ptAz",      0.0f)    \
+    X(float, pointB_z,          "ptBz",      0.0f)    \
     \
     X(float, wcsOffsetX,        "wcsX",      0.0f)    \
     X(float, wcsOffsetY,        "wcsY",      0.0f)    \

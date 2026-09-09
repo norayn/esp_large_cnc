@@ -25,6 +25,9 @@ static StepCmd stepRingBuffer[STEP_BUFFER_SIZE];
 static volatile uint32_t bufferHead = 0; 
 static volatile uint32_t bufferTail = 0; 
 
+// Статический флаг для блокировки триггера концевиков в ISR во время поиска баз
+static volatile bool isHomingActive = false;
+
 // Честные физические счетчики шагов станка (изменяются ИСКЛЮЧИТЕЛЬНО в прерывании таймера)
 volatile long currentStepsX = 0;
 volatile long currentStepsY = 0;
@@ -424,9 +427,15 @@ void motionTask(void * parameter) {
 static volatile bool timerPhaseHigh = true;
 
 void IRAM_ATTR onTimerInterrupt() {
-    // --- 5.1. АППАРАТНЫЙ КОНТУР БЕЗОПАСНОСТИ СТАНКА ---
-    // Опрашиваем пины защиты напрямую из регистров (срабатывание мгновенно)
-    if (digitalRead(ESTOP_PIN) == HIGH || digitalRead(MOTORS_ALARM) == HIGH || digitalRead(ENDSTOPS_PIN) == HIGH) {
+    // Проверяем критические аварии, которые должны сработать ВСЕГДА
+    bool criticalAlarm = (digitalRead(ESTOP_PIN) == HIGH || digitalRead(MOTORS_ALARM) == HIGH);
+    
+    // Линию концевиков подмешиваем к аварии ТОЛЬКО если сейчас не идет процедура хоуминга
+    if (!isHomingActive && digitalRead(ENDSTOPS_PIN) == HIGH) {
+        criticalAlarm = true;
+    }
+
+    if (criticalAlarm) {
         digitalWrite(MOTORS_ENABLE, HIGH); // Немедленно обесточить драйверы Leadshine
         
         // Жестко сбрасываем буфер времени и останавливаем станок
@@ -511,6 +520,7 @@ void IRAM_ATTR onTimerInterrupt() {
 bool homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps) {
     const uint16_t HOMING_DELAY_TICKS = 50; // Жесткая задержка скорости хоуминга (эквивалент ~2 кГц)
     
+    isHomingActive = true;
     // Шаг 1: Едем в сторону датчика до физического срабатывания
     while (digitalRead(endstopPin) == LOW) {
         // Если оператор нажал E-STOP во время поиска баз — немедленно выходим
@@ -561,6 +571,7 @@ bool homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, in
     
     // Жестко зануляем физический и математический счетчик оси! База официально найдена.
     axisSteps = 0; 
+    isHomingActive = false;
     return true;
 }
 

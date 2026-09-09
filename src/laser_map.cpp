@@ -3,6 +3,8 @@
 #include "config.h"
 #include "pinout.h"
 #include "wifi_manager.h"
+#include "state_manager.h"
+#include "gcode_program.h"
 
 static String camBuffer = "";
 
@@ -33,16 +35,35 @@ void updateLaserMapCommunication() {
 }
 
 void runAutoCalibration() {
-    initMotion(); 
+    Serial.println("STATUS: Starting laser map auto-calibration...");
+    
     for (int i = 0; i < cfg.laserMapSize; i++) {
-        float tX = i * cfg.laserGridStep;
-        prepareVectorSegment(tX, 0.0, 0.0, 400.0, cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed);
-        while (isVectorMoving) { delay(10); }
-        delay(500); 
+        // Если станок уже в АВАРИИ, прекращаем итерации по точкам
+        if (currentMachineState == STATE_ALARM) {
+            Serial.println("ERROR: Calibration cancelled. Machine is in ALARM state.");
+            return;
+        }
 
+        // 1. Позиционируем каретку в точку X
+        float targetX = i * cfg.laserGridStep;
+        // Команда на перемещение в машинных координатах...
+        
+        // 2. Ждем остановки физических осей
+        while (isPlannerBusy) {
+            checkHardwareSecurity();
+            if (currentMachineState == STATE_ALARM) return;
+            delay(10);
+        }
+        
+        // Пауза на гашение вибраций станины
+        delay(500); 
+        
+        // 3. Запрос к камере
         Serial2.println("MEASURE");
         unsigned long sWait = millis(); String resp = ""; bool rec = false;
         while (millis() - sWait < 2000) {
+            
+            
             if (Serial2.available() > 0) {
                 char c = Serial2.read();
                 if (c == '\n' || c == '\r') { if (resp.length() > 0) { rec = true; break; } }

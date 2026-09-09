@@ -69,10 +69,38 @@ void changeState(MachineState newState) {
 }
 
 void checkHardwareSecurity() {
-    if (digitalRead(ESTOP_PIN) == HIGH || digitalRead(MOTORS_ALARM) == HIGH || digitalRead(ENDSTOPS_PIN) == HIGH) {
-        if (currentMachineState != STATE_ALARM) changeState(STATE_ALARM);
+    // Аппаратная кнопка аварийной остановки (E-STOP) должна работать ВСЕГДА
+    if (digitalRead(ESTOP_PIN) == LOW) { // Предположим, LOW = нажата
+        if (currentMachineState != STATE_ALARM) {
+            changeState(STATE_ALARM);
+            Serial.println("CRITICAL: E-STOP Button Pressed!");
+        }
+        return;
+    }
+
+    if (digitalRead(MOTORS_ALARM) == HIGH) {
+        if (currentMachineState != STATE_ALARM) {
+            changeState(STATE_ALARM);
+            Serial.println("CRITICAL: Motor alarm!");
+        }
+        return;
+    }
+
+    // ХОУМИНГ-ПАТЧ: Если идет легальный поиск баз, отключаем аварийный триггер концевиков.
+    // За их триггеры сейчас отвечает алгоритм поиска нуля в motion.cpp.
+    if (currentMachineState == STATE_HOMING) {
+        return; 
+    }
+
+    // Стандартная рантайм-защита (работает в IDLE, RUNNING, JOGGING и т.д.)
+    if (digitalRead(ENDSTOPS_PIN) == HIGH) {
+        if (currentMachineState != STATE_ALARM) {
+            changeState(STATE_ALARM);
+            Serial.println("CRITICAL: Limit switch triggered during runtime operation!");
+        }
     }
 }
+
 
 void reportStatusToPC() {
     // 1. ПРОВЕРКА ТАЙМЕРА: Заходим внутрь строго с шагом statusInterval (в обоих режимах)

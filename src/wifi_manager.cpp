@@ -264,39 +264,34 @@ static bool handleMapTransferCommands(const String& cmd) {
 // 4. Прием и декомпозиция бинарных кадров G-кода (Универсально, доступно при заливке)
 // Вызывается из основного цикла, если пришел маркер "B:"
 bool handleBinaryCommandPacket(const String& cmd) {
-    // Входной формат от Python теперь имеет вид: "B:TYPE;LINE_NUM;X;Y;Z;F_MAX;V_START;V_END"
-    int firstColon = cmd.indexOf(':');
-    if (firstColon == -1) return false;
-    
-    String data = cmd.substring(firstColon + 1);
-    
-    // Массив для хранения позиций семи разделителей ';'
-    int semicolons[7];
-    int currentIdx = 0;
-    int pos = 0;
-    
-    // Ищем ровно 7 разделителей
-    while ((pos = data.indexOf(';', pos)) != -1 && currentIdx < 7) {
-        semicolons[currentIdx++] = pos;
-        pos++;
+    // 1. Извлекаем указатель на сырой сишный буфер строки, полностью исключая фрагментацию кучи
+    const char* payload = cmd.c_str();
+
+    // 2. Локальные переменные для временного хранения данных кадра на стеке
+    int typeInt = 0;
+    int lineInt = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float f = 0.0f;
+    float v_start = 0.0f;
+    float v_end = 0.0f;
+
+    // 3. Вызываем sscanf для быстрого разбора по жесткому шаблону разделителей
+    int parsedFields = sscanf(payload, "B:%d;%d;%f;%f;%f;%f;%f;%f", 
+                              &typeInt, &lineInt, &x, &y, &z, &f, &v_start, &v_end);
+
+    // 4. Защита: sscanf обязан успешно заполнить все 8 объявленных полей
+    if (parsedFields != 8) {
+        Serial.printf("ERROR: Look-Ahead binary packet corrupt! Parsed fields: %d/8. Raw: %s\n", parsedFields, payload);
+        return false; 
     }
-    
-    // Защита: Если разделителей меньше 7 — пакет битый или старого формата
-    if (currentIdx < 7) return false;
-    
-    // Извлекаем подстроки строго по найденным целочисленным маркерам
-    uint8_t type  = data.substring(0, semicolons[0]).toInt();
-    uint16_t line = data.substring(semicolons[0] + 1, semicolons[1]).toInt();
-    float x       = data.substring(semicolons[1] + 1, semicolons[2]).toFloat();
-    float y       = data.substring(semicolons[2] + 1, semicolons[3]).toFloat();
-    float z       = data.substring(semicolons[3] + 1, semicolons[4]).toFloat();
-    float f       = data.substring(semicolons[4] + 1, semicolons[5]).toFloat();
-    
-    // НОВЫЕ ПОЛЯ: Забираем готовые Look-Ahead скорости (они передаются в мм/сек)
-    float v_start = data.substring(semicolons[5] + 1, semicolons[6]).toFloat();
-    float v_end   = data.substring(semicolons[6] + 1).toFloat();
-    
-    // Передаем данные в функцию добавления в ОЗУ-массив станка.
-    // (Не забудьте обновить сигнатуру addBinaryCommand в gcode_program.cpp, чтобы она принимала v_start и v_end)
+
+    // Приведение типов под сигнатуру буфера УП ЧПУ (gcode_program)
+    uint8_t type = (uint8_t)typeInt;
+    uint16_t line = (uint16_t)lineInt;
+
+    // 5. Передаем данные в ОЗУ-массив станка
     return addBinaryCommand(type, line, x, y, z, f, v_start, v_end);
 }
+
