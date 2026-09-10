@@ -341,12 +341,15 @@ void motionTask(void * parameter) {
 
             // --- ХОДОВОЙ ЦИКЛ ГЕНЕРАЦИИ ТАКТОВ ПОДВЕКТОРА ---
             // Цикл итерируется строго по физическому количеству импульсов, которые нужно выдать
-            for (long step = 0; step < totalSegSteps; step++) {
             
-                // 1. ВЫЧИСЛЕНИЕ ТЕКУЩЕЙ ЧАСТОТЫ ИМПУЛЬСОВ МАСТЕР-ОСИ (в шагах в секунду)
-                // Умножаем текущую скорость (мм/сек) на цену шага Мастер-Оси (шагов/мм) из конфига.
-                // Пример: 25.0 мм/сек * 400 шагов/мм = 10 000 Импульсов/сек (Гц)
-                float masterFrequency = currentVelocity * masterStepsPerMm;
+            // maxSegmentSteps — полный объем шагов ведущей оси на ВСЕМ макро-кадре (для Z это 2004, для Y в кадре 5 это 10352)
+            // totalLength_mm — полная пространственная 3D длина всего кадра в миллиметрах (5.01 или 100.0)
+            float globalMasterStepsPerMm = (float)maxSegmentSteps / totalLength_mm;
+            if (globalMasterStepsPerMm < 0.001f) globalMasterStepsPerMm = 1.0f; // Защита от деления на ноль
+
+            for (long step = 0; step < totalSegSteps; step++) {
+                // Считаем частоту Master-оси на основе её реального вклада в пространственную траекторию:
+                float masterFrequency = currentVelocity * globalMasterStepsPerMm;
             
                 // Защита от деления на ноль: частота не может быть ниже 1 Гц (1 шаг в секунду)
                 if (masterFrequency < 1.0f) masterFrequency = 1.0f;
