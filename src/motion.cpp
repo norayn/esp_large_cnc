@@ -28,6 +28,22 @@ static volatile uint32_t bufferTail = 0;
 // Статический флаг для блокировки триггера концевиков в ISR во время поиска баз
 static volatile bool isHomingActive = false;
 
+// Динамический программный Override общей подачи со слайдера PyQt6 (1.0 = 100%)
+float pythonFeedrateOverride = 1.0f;
+
+// Внутренний ПЛАВНЫЙ override, который будет рассчитываться в updateFeedrateFading()
+volatile float smoothedFeedrateOverride = 1.0f;
+
+// Переменная плавного аппаратного ограничения скорости для паузы (в мм/сек)
+volatile float virtualSpeedLimit = 1000.0f; // Изначально открыт на максимум
+
+// Флаг, сигнализирующий, что генератор DDA был заморожен в мертвой точке паузы
+static bool isGeneratorSuspendedOnHold = false;
+
+// Глобальное зеркало текущей скорости DDA для связи между ядрами
+volatile float sharedCurrentVelocity = 0.0f;
+
+
 // Честные физические счетчики шагов станка (изменяются ИСКЛЮЧИТЕЛЬНО в прерывании таймера)
 volatile long currentStepsX = 0;
 volatile long currentStepsY = 0;
@@ -48,9 +64,6 @@ static CorrectionPoint curvatureMap[250];
 
 // Объявление структуры-посредника неблокирующего обмена кадрами между Ядром 0 и Ядром 1
 volatile InputSegment nextSeg = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
-
-// Динамический программный Override общей подачи со слайдера PyQt6 (1.0 = 100%)
-float pythonFeedrateOverride = 1.0f;
 
 
 // ============================================================================
@@ -348,21 +361,53 @@ void motionTask(void * parameter) {
             if (globalMasterStepsPerMm < 0.001f) globalMasterStepsPerMm = 1.0f; // Защита от деления на ноль
 
             for (long step = 0; step < totalSegSteps; step++) {
+                // АППАРАТНАЯ ЗАМОРОЗКА ГЕОМЕТРИИ DDA НА ПАУЗЕ (Проверка перед каждым шагом)
+                // 1. Физическая заморозка геометрического шага DDA
+                if (currentMachineState == STATE_HOLD && virtualSpeedLimit  <= 0.001f) {
+                    isGeneratorSuspendedOnHold = true;
+
+                    // Крутимся в легковесном цикле, пока удерживается пауза. 
+                    // Математика Брезенхема/DDA замерла строго на текущем шаге.
+                    while (currentMachineState == STATE_HOLD) {
+                        vTaskDelay(pdMS_TO_TICKS(5)); 
+                    }
+                }
+
+                // 2. Выход из заморозки при нажатии RESUME
+                if (isGeneratorSuspendedOnHold && currentMachineState == STATE_RUNNING) {
+
+                    // очищаем кольцевой буфер от пустых тактов ожидания и "тишины"
+                    bufferHead = 0;
+                    bufferTail = 0;
+
+                    isGeneratorSuspendedOnHold = false;
+                }
+                // =====================================================
+
                 // Считаем частоту Master-оси на основе её реального вклада в пространственную траекторию:
                 float masterFrequency = currentVelocity * globalMasterStepsPerMm;
             
                 // Защита от деления на ноль: частота не может быть ниже 1 Гц (1 шаг в секунду)
                 if (masterFrequency < 1.0f) masterFrequency = 1.0f;
+
+                // ВЫЧИСЛЯЕМ ЭФФЕКТИВНУЮ СКОРОСТЬ ВЕКТОРНОГО ШАГА:
+                // Берем текущую скорость из G-код трапеции (currentVelocity) 
+                // и искусственно зажимаем её сверху плавным лимитом паузы virtualSpeedLimit
+                float effectiveVelocity = currentVelocity;
+                if (effectiveVelocity > virtualSpeedLimit) {
+                    effectiveVelocity = virtualSpeedLimit;
+                }
+                // Нижний предохранитель для стабильного наката на микро-скоростях
+                if (effectiveVelocity < 0.1f) effectiveVelocity = 0.1f;
             
+                // Считаем частоту шагов на основе эффективной скорости
+                float effectiveMasterFrequency = effectiveVelocity * globalMasterStepsPerMm;
+                if (effectiveMasterFrequency < 1.0f) effectiveMasterFrequency = 1.0f;
             
-                // 2. ПЕРЕВОД ФИЗИЧЕСКОЙ ЧАСТОТЫ В ДИСКРЕТНЫЕ КВАНТЫ ЧПУ-ЛЕНТЫ
-                // Делим базовую частоту планирования сетки (BASE_CNC_FREQ = 100 000 Гц) на частоту шагов,
-                // дополнительно умноженную на глобальный множитель подачи pythonFeedrateOverride.
-                // Пример при 100% подаче (1.0f): 100 000 / (10 000 * 1.0) = 10 тактов паузы на этот шаг.
-                uint16_t delay100kHz = (uint16_t)(BASE_CNC_FREQ / (masterFrequency * pythonFeedrateOverride));
+                // РАСЧЕТ ЗАДЕРЖКИ ТАЙМЕРА:
+                // Но теперь частота плавно падает до нуля и плавно растет при старте за счет effectiveMasterFrequency!
+                uint16_t delay100kHz = ( uint16_t)( BASE_CNC_FREQ / (effectiveMasterFrequency * smoothedFeedrateOverride ));
             
-                // Аппаратная защита таймера: задержка не может быть меньше 1 такта сетки (10 микросекунд).
-                // Это ограничивает максимальную частоту импульсов на отметке 100 кГц, предотвращая зависание ISR.
                 if (delay100kHz < 1) delay100kHz = 1;
             
             
@@ -424,6 +469,8 @@ void motionTask(void * parameter) {
                     // На маршевом участке скорость станка строго стабильна и равна максимальной подаче кадра
                     currentVelocity = v_max;
                 }
+
+                sharedCurrentVelocity = currentVelocity; 
 
                 // ====================================================================
                 // БЛОК 3: ИЗОЛИРОВАННЫЙ ЦЕЛОЧИСЛЕННЫЙ АЛГОРИТМ БРЕЗЕНХЕМА (Core 1)
@@ -714,39 +761,56 @@ void runFullHoming() {
 
 void updateFeedrateFading() {
     static unsigned long lastFadeTime = 0;
-    unsigned long now = millis();
+    static MachineState lastState = STATE_IDLE; 
     
-    // Выдерживаем шаг изменения рампы раз в 5 миллисекунд
+    unsigned long now = millis();
     if (now - lastFadeTime < 5) return;
+    
+    // Честная дельта времени (0.005 сек)
+    float dt = (float)(now - lastFadeTime) / 1000.0f;
     lastFadeTime = now;
 
-    // Шаг изменения коэффициента за 5 мс, чтобы вся рампа от 0% до 100% длилась ровно 300 мс
+    // Максимальный шаг изменения физической скорости за 5 мс на основе ускорения
+    float maxDeltaV = cfg.maxAcceleration * dt; 
+
+    // Определяем физическую цель для лимита скорости
+    float targetSpeedLimit = 150.0f; // Любое заведомо высокое значение (мм/сек)
+
+    if (currentMachineState == STATE_HOLD) {
+        if (lastState != STATE_HOLD) {
+            // Подхватываем актуальную внутреннюю скорость из motionTask
+            virtualSpeedLimit = sharedCurrentVelocity; 
+        }
+        targetSpeedLimit = 0.0f; // При паузе цель — полная физическая остановка
+    }
+
+    lastState = currentMachineState; 
+
+    // Плавно ведем лимит к цели строго по физическому ускорению
+    if (virtualSpeedLimit < targetSpeedLimit) {
+        virtualSpeedLimit += maxDeltaV;
+        if (virtualSpeedLimit > targetSpeedLimit) virtualSpeedLimit = targetSpeedLimit;
+    } 
+    else if (virtualSpeedLimit > targetSpeedLimit) {
+        virtualSpeedLimit -= maxDeltaV;
+        if (virtualSpeedLimit < targetSpeedLimit) virtualSpeedLimit = targetSpeedLimit;
+    }
+
+    // Здесь целевое значение берется из глобальных настроек ползунка (по умолчанию 1.0f)
+    //float targetOverride = cfg.feedMultiplier;
+
     const float FADE_STEP = 5.0f / 300.0f; // ~0.0166 на один шаг
 
-    // СЦЕНАРИЙ А: Нажата кнопка Паузы (HOLD). Плавно гасим скорость до полного нуля
-    if (currentMachineState == STATE_HOLD) {
-        if (pythonFeedrateOverride > 0.0f) {
-            pythonFeedrateOverride -= FADE_STEP;
-            if (pythonFeedrateOverride < 0.0f) {
-                pythonFeedrateOverride = 0.0f; // Станок полностью замер, но буфер и траектория сохранены!
-            }
-        }
-    }
-    // СЦЕНАРИЙ Б: Работает автоматическая программа. Плавно возвращаем скорость к 100% (или значению слайдера)
-    else if (currentMachineState == STATE_RUNNING) {
-        // Здесь целевое значение берется из глобальных настроек ползунка (по умолчанию 1.0f)
-        float targetOverride = cfg.feedMultiplier; 
-        
-        if (pythonFeedrateOverride < targetOverride) {
-            pythonFeedrateOverride += FADE_STEP;
-            if (pythonFeedrateOverride > targetOverride) pythonFeedrateOverride = targetOverride;
-        }
-        else if (pythonFeedrateOverride > targetOverride) {
-            pythonFeedrateOverride -= FADE_STEP;
-            if (pythonFeedrateOverride < targetOverride) pythonFeedrateOverride = targetOverride;
-        }
+    if (smoothedFeedrateOverride < pythonFeedrateOverride) {
+        smoothedFeedrateOverride += FADE_STEP;
+        if (smoothedFeedrateOverride > pythonFeedrateOverride) smoothedFeedrateOverride = pythonFeedrateOverride;
+    } 
+    else if (smoothedFeedrateOverride > pythonFeedrateOverride) {
+        smoothedFeedrateOverride -= FADE_STEP;
+        if (smoothedFeedrateOverride < pythonFeedrateOverride) smoothedFeedrateOverride = pythonFeedrateOverride;
     }
 }
+
 
 void startMotionTask() {
     // Создаем изолированную задачу для Ядра 1 с наивысшим приоритетом 24
