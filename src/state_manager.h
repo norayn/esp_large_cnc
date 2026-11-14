@@ -20,7 +20,8 @@ extern volatile bool isHomed;
 extern volatile MachineState currentMachineState;
 
 String getStateName();
-void changeState(MachineState newState);
+// true = переход выполнен; false = запрещён (ALARM или нет хоуминга).
+bool changeState(MachineState newState);
 void checkHardwareSecurity();
 void reportStatusToPC();
 

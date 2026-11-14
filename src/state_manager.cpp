@@ -33,15 +33,19 @@ String getStateName() {
     }
 }
 
-void changeState(MachineState newState) {
-    if (currentMachineState == STATE_ALARM && newState != STATE_IDLE) return;
+bool changeState(MachineState newState) {
+    if (currentMachineState == STATE_ALARM && newState != STATE_IDLE && newState != STATE_ALARM) {
+        String err = "ERROR: Machine is in ALARM. Send RESET_ALARM first.";
+        Serial.println(err); sendToWiFiClient(err);
+        return false;
+    }
 
     if (!isHomed) {
         if (newState == STATE_JOGGING && cfg.allowJogBeforeHoming) { } 
         else if (newState == STATE_RUNNING || newState == STATE_JOGGING || newState == STATE_CALIBRATION) {
             String err = "ERROR: Machine is LOCKED. Run HOMING first.";
             Serial.println(err); sendToWiFiClient(err);
-            return;
+            return false;
         }
     }
 
@@ -72,6 +76,7 @@ void changeState(MachineState newState) {
             break;
     }
     currentMachineState = newState;
+    return true;
 }
 
 void checkHardwareSecurity() {

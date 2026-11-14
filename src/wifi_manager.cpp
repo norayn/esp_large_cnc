@@ -146,7 +146,7 @@ static bool handleGlobalCommands(const String& cmd) {
     }
     if (cmd == "RESUME" || cmd == "~") {
         if (currentMachineState == STATE_HOLD) {
-            changeState(STATE_RUNNING);
+            changeState(STATE_RUNNING); // при отказе changeState сам выдаст ERROR
             return true;
         }
     }
@@ -188,12 +188,15 @@ static bool handleIdleCommands(const String& cmd) {
         return false;
     }
     if (cmd == "START_CALIBRATION") {
-        changeState(STATE_CALIBRATION); runAutoCalibration();
+        if (!changeState(STATE_CALIBRATION)) return true; // отказ: ERROR уже отправлен
+        runAutoCalibration();
         if (currentMachineState == STATE_CALIBRATION) changeState(STATE_IDLE);
         return true;
     } 
     if (cmd == "EXPORT_MAP") {
-        changeState(STATE_MAP_TRANSFER); exportMapToPC(); changeState(STATE_IDLE);
+        if (!changeState(STATE_MAP_TRANSFER)) return true;
+        exportMapToPC();
+        changeState(STATE_IDLE);
         return true;
     }
     if (cmd == "MAP_LOAD_START") {
@@ -211,13 +214,14 @@ static bool handleIdleCommands(const String& cmd) {
         return true;
     }
     if (cmd == "GCODE_UPLOAD_START") {
+        // Жестко переключаем автомат в режим приема G-кода!
+        if (!changeState(STATE_GCODE_UPLOAD)) return true;
         clearGCodeBuffer();
-        changeState(STATE_GCODE_UPLOAD); // Жестко переключаем автомат в режим приема G-кода!
         sendToWiFiClient("STATUS: Ready");
         return true;
     }
     if (cmd == "START_PROGRAM") {
-        if (totalLoadedCommands > 0) { startProgramExecution(); }
+        startProgramExecution(); // внутри проверки ALARM/хоуминга/пустого буфера
         return true;
     }
     if (cmd.startsWith("START_FROM_LINE:")) {
@@ -231,13 +235,14 @@ static bool handleIdleCommands(const String& cmd) {
     }
     if (cmd == "GET_LAST_ABORTED_LINE") { sendToWiFiClient("LAST_LINE:" + String(cfg.lastExecutedLine)); return true; }
     if (cmd.startsWith("JOG:")) {
-        changeState(STATE_JOGGING); 
+        if (!changeState(STATE_JOGGING)) return true; // отказ: станок не двигаем
         processSingleManualCommand(cmd.substring(4)); 
         //changeState(STATE_IDLE);
         return true;
     }
     if (cmd == "HOME" || cmd == "$H") {
-        changeState(STATE_HOMING); runFullHoming();
+        if (!changeState(STATE_HOMING)) return true; // отказ: ERROR уже отправлен
+        runFullHoming();
         if (currentMachineState == STATE_HOMING) changeState(STATE_IDLE);
         return true;
     }
@@ -253,7 +258,7 @@ static bool handleIdleCommands(const String& cmd) {
             float stepX  = data.substring(idx2 + 1, idx3).toFloat();
             float speed  = data.substring(idx3 + 1).toFloat();
 
-            changeState(STATE_CALIBRATION);
+            if (!changeState(STATE_CALIBRATION)) return true; // отказ: ERROR уже отправлен
             extern void runGeometryScan(float startX, float endX, float stepX, float feedRate);
             runGeometryScan(startX, endX, stepX, speed);
             if (currentMachineState == STATE_CALIBRATION) changeState(STATE_IDLE);

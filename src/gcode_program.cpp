@@ -3,6 +3,7 @@
 #include "config.h"
 #include "pinout.h"
 #include "state_manager.h"
+#include "wifi_manager.h"
 
 BinaryCommand gcodeBuffer[MAX_COMMANDS_BUFFER];
 int totalLoadedCommands = 0;
@@ -214,7 +215,24 @@ void deactivateAlignmentExternal() {
     saveAlignmentToEEPROM();
 }
 
-void startProgramExecution() {
+bool startProgramExecution() {
+    // Запуск УП запрещён в ALARM, без хоуминга и при пустом буфере.
+    if (currentMachineState == STATE_ALARM) {
+        String err = "ERROR: Machine is in ALARM. Send RESET_ALARM first.";
+        Serial.println(err); sendToWiFiClient(err);
+        return false;
+    }
+    if (!isHomed) {
+        String err = "ERROR: Machine is LOCKED. Run HOMING first.";
+        Serial.println(err); sendToWiFiClient(err);
+        return false;
+    }
+    if (totalLoadedCommands <= 0) {
+        String err = "ERROR: No G-code program loaded.";
+        Serial.println(err); sendToWiFiClient(err);
+        return false;
+    }
+
     // ЖЕСТКИЙ HANDSHAKE БАЗЫ: Перед запуском первого кадра УП 
     // приравниваем виртуальные оси планировщика к реальному положению моторов на столе
     plannerStepsX = currentStepsX;
@@ -222,8 +240,9 @@ void startProgramExecution() {
     plannerStepsZ = currentStepsZ;
 
     currentCommandIndex = 0; // Сброс указателя на начало массива в ОЗУ
-    changeState(STATE_RUNNING);
-    
+    if (!changeState(STATE_RUNNING)) return false;
+
     executeNextProgramStep(); // Вызываем первый шаг
+    return true;
 }
 

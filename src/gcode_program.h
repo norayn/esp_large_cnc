@@ -61,6 +61,7 @@ void executeNextProgramStep();
 // Обработчик одиночных ручных команд (JOG)
 void processSingleManualCommand(String line);
 
-void startProgramExecution();
+// true = программа запущена; false = отказ (ALARM, нет хоуминга или пустой буфер).
+bool startProgramExecution();
 
 #endif
