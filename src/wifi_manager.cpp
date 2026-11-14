@@ -129,6 +129,15 @@ static bool handleGlobalCommands(const String& cmd) {
         changeState(STATE_IDLE);
         return true;
     }
+    if (cmd == "STOP") {
+        // Мягкая остановка: сохраняем isHomed, но полностью прекращаем движение
+        // и очищаем очередь. В ALARM остаёмся в ALARM до RESET_ALARM.
+        requestMotionStop();
+        if (currentMachineState != STATE_ALARM) {
+            changeState(STATE_IDLE);
+        }
+        return true;
+    }
     if (cmd == "HOLD" || cmd == "!") {
         if (currentMachineState == STATE_RUNNING || currentMachineState == STATE_JOGGING) {
             changeState(STATE_HOLD);
@@ -179,7 +188,8 @@ static bool handleIdleCommands(const String& cmd) {
         return false;
     }
     if (cmd == "START_CALIBRATION") {
-        changeState(STATE_CALIBRATION); runAutoCalibration(); changeState(STATE_IDLE);
+        changeState(STATE_CALIBRATION); runAutoCalibration();
+        if (currentMachineState == STATE_CALIBRATION) changeState(STATE_IDLE);
         return true;
     } 
     if (cmd == "EXPORT_MAP") {
@@ -227,7 +237,8 @@ static bool handleIdleCommands(const String& cmd) {
         return true;
     }
     if (cmd == "HOME" || cmd == "$H") {
-        changeState(STATE_HOMING); runFullHoming(); changeState(STATE_IDLE);
+        changeState(STATE_HOMING); runFullHoming();
+        if (currentMachineState == STATE_HOMING) changeState(STATE_IDLE);
         return true;
     }
     if (cmd.startsWith("SCAN_GEOMETRY:")) {
@@ -245,7 +256,7 @@ static bool handleIdleCommands(const String& cmd) {
             changeState(STATE_CALIBRATION);
             extern void runGeometryScan(float startX, float endX, float stepX, float feedRate);
             runGeometryScan(startX, endX, stepX, speed);
-            changeState(STATE_IDLE);
+            if (currentMachineState == STATE_CALIBRATION) changeState(STATE_IDLE);
             return true; // Команда успешно выполнена
         }
         return false;

@@ -5,6 +5,9 @@
 #include "state_manager.h"
 #include <Arduino.h>
 
+// Аппаратный таймер создаётся в main.cpp; нужен для остановки/запуска выдачи шагов.
+extern hw_timer_t* cncTimer;
+
 // Размер кольцевой ленты времени (8192 тика = 40.96 миллисекунд подушки безопасности ОЗУ)
 #define STEP_BUFFER_SIZE 4096
 // Структура одной микросекундной ячейки времени
@@ -27,6 +30,14 @@ static volatile uint32_t bufferTail = 0;
 
 // Статический флаг для блокировки триггера концевиков в ISR во время поиска баз
 static volatile bool isHomingActive = false;
+
+// Аварийный / остановочный запросы. ISR только выставляет флаги и обесточивает
+// драйверы; изменение FSM, Preferences и Serial выполняет loop().
+static volatile bool motionStopRequested = false;
+static volatile bool alarmRequested = false;
+
+// Флаг фазы таймера: true = нечетный такт (HIGH), false = четный такт (LOW)
+static volatile bool timerPhaseHigh = true;
 
 // Динамический программный Override общей подачи со слайдера PyQt6 (1.0 = 100%)
 float pythonFeedrateOverride = 1.0f;
@@ -64,6 +75,69 @@ static CorrectionPoint curvatureMap[250];
 
 // Объявление структуры-посредника неблокирующего обмена кадрами между Ядром 0 и Ядром 1
 volatile InputSegment nextSeg = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
+
+
+// ============================================================================
+// СТРУКТУРНЫЙ БЛОК: ОСТАНОВКА ДВИЖЕНИЯ И АВАРИЙНЫЕ ЗАПРОСЫ
+// ============================================================================
+
+// Разрешает выдачу шагов. Вызывается перед новым кадром/хоумингом.
+// Возвращает false, если станок в ALARM или авария ещё не обработана.
+static bool armMotionTimer() {
+    if (currentMachineState == STATE_ALARM || alarmRequested) return false;
+
+    if (motionStopRequested) {
+        noInterrupts();
+        bufferHead = 0;
+        bufferTail = 0;
+        motionStopRequested = false;
+        interrupts();
+    }
+
+    // Фазу таймера здесь не трогаем: ISR сам завершит текущий импульс STEP.
+    if (cncTimer != nullptr) timerAlarmEnable(cncTimer);
+    return true;
+}
+
+// Мягкая остановка: выдача шагов прекращается сразу, очередь сбрасывается,
+// математическая база планировщика приравнивается к фактической позиции.
+void requestMotionStop() {
+    motionStopRequested = true;
+
+    if (cncTimer != nullptr) timerAlarmDisable(cncTimer);
+
+    noInterrupts();
+    bufferHead = 0;
+    bufferTail = 0;
+    plannerStepsX = currentStepsX;
+    plannerStepsY = currentStepsY;
+    plannerStepsZ = currentStepsZ;
+    interrupts();
+
+    digitalWrite(X_STEP_PIN, LOW);
+    digitalWrite(Y_STEP_PIN, LOW);
+    digitalWrite(Z_STEP_PIN, LOW);
+
+    timerPhaseHigh = true;
+    isVectorMoving = false;
+    isPlannerBusy = false;
+    isGeneratorSuspendedOnHold = false;
+    nextSeg.hasNewData = false;
+
+    // Таймер снова включаем: ISR шагов не выдаёт (motionStopRequested), но
+    // продолжает следить за ESTOP/MOTORS_ALARM независимо от loop().
+    if (cncTimer != nullptr) timerAlarmEnable(cncTimer);
+}
+
+bool isMotionStopRequested() {
+    return motionStopRequested;
+}
+
+bool consumeAlarmRequest() {
+    if (!alarmRequested) return false;
+    alarmRequested = false;
+    return true;
+}
 
 
 // ============================================================================
@@ -123,10 +197,16 @@ CorrectionPoint getCorrection(float currentX) {
 void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec, 
                           float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec) {
     
+    if (!armMotionTimer()) return;
+
     // Блокировка от затирания: ждем, пока Ядро 1 заберет предыдущий пакет
     while (nextSeg.hasNewData) { 
+        if (motionStopRequested || alarmRequested) return;
         delay(1); 
     }
+
+    // Остановка могла прийти, пока ждали освобождения посредника.
+    if (motionStopRequested || alarmRequested) return;
     
     // Перекладываем геометрию и скорости кадра в структуру межъядерного обмена
     nextSeg.x = newX; 
@@ -161,6 +241,15 @@ void motionTask(void * parameter) {
     long localStepsZ = 0;
 
     while (true) {
+        // Остановка/авария: не начинаем новый кадр и не трогаем буфер.
+        if (motionStopRequested || alarmRequested) {
+            nextSeg.hasNewData = false;
+            isVectorMoving = false;
+            isPlannerBusy = false;
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
         // --- 4.1.1. ОПРОС И БЛОКИРОВКА МЕЖЪЯДЕРНОЙ ОЧЕРЕДИ ---
         if (!nextSeg.hasNewData) {
             // Если в кольцевом буфере физически кончились шаги, сигнализируем Ядру 0 в main.cpp
@@ -316,6 +405,8 @@ void motionTask(void * parameter) {
         localStepsY = plannerStepsY;
         localStepsZ = plannerStepsZ;
 
+        bool frameAborted = false;
+
         // Поочередно прогоняем 3 рассчитанных подвектора (Разгон, Марш, Торможение)
         for (uint8_t segIdx = 0; segIdx < 3; segIdx++) {
             
@@ -361,6 +452,11 @@ void motionTask(void * parameter) {
             if (globalMasterStepsPerMm < 0.001f) globalMasterStepsPerMm = 1.0f; // Защита от деления на ноль
 
             for (long step = 0; step < totalSegSteps; step++) {
+                if (motionStopRequested || alarmRequested) {
+                    frameAborted = true;
+                    break;
+                }
+
                 // АППАРАТНАЯ ЗАМОРОЗКА ГЕОМЕТРИИ DDA НА ПАУЗЕ (Проверка перед каждым шагом)
                 // 1. Физическая заморозка геометрического шага DDA
                 if (currentMachineState == STATE_HOLD && virtualSpeedLimit  <= 0.001f) {
@@ -369,17 +465,20 @@ void motionTask(void * parameter) {
                     // Крутимся в легковесном цикле, пока удерживается пауза. 
                     // Математика Брезенхема/DDA замерла строго на текущем шаге.
                     while (currentMachineState == STATE_HOLD) {
+                        if (motionStopRequested || alarmRequested) break;
                         vTaskDelay(pdMS_TO_TICKS(5)); 
                     }
                 }
 
-                // 2. Выход из заморозки при нажатии RESUME
+                if (motionStopRequested || alarmRequested) {
+                    frameAborted = true;
+                    break;
+                }
+
+                // 2. Выход из заморозки при нажатии RESUME.
+                // Буфер не очищаем: уже рассчитанные шаги должны быть доиграны,
+                // иначе теряется геометрия и plannerSteps уходит от реальности.
                 if (isGeneratorSuspendedOnHold && currentMachineState == STATE_RUNNING) {
-
-                    // очищаем кольцевой буфер от пустых тактов ожидания и "тишины"
-                    bufferHead = 0;
-                    bufferTail = 0;
-
                     isGeneratorSuspendedOnHold = false;
                 }
                 // =====================================================
@@ -527,10 +626,16 @@ void motionTask(void * parameter) {
                 
                     // Если голова догнала хвост (буфер ОЗУ забит на все 40.96 мс вперед)
                     while (nextHead == bufferTail) {
+                        if (motionStopRequested || alarmRequested) {
+                            frameAborted = true;
+                            break;
+                        }
                         // Уступаем квант времени операционной системе FreeRTOS на 1 мс.
                         // Прерывание таймера на Core 1 продолжит читать буфер и освободит место.
                         vTaskDelay(pdMS_TO_TICKS(1)); 
                     }
+
+                    if (frameAborted) break;
                 
                     // 2. ИНИЦИАЛИЗАЦИЯ ЧИСТОЙ БИНАРНОЙ КОМАНДЫ ВРЕМЕНИ
                     // Создаем пустую микроструктуру (по умолчанию все шаги равны 0, valid = 0)
@@ -560,6 +665,16 @@ void motionTask(void * parameter) {
             } // Конец цикла по шагам текущего подвектора
         } // Конец цикла по 3-м подвекторам
 
+        // Остановка во время генерации: кадр отбрасывается, plannerSteps уже
+        // синхронизирован с фактическими счётчиками в requestMotionStop().
+        if (frameAborted || motionStopRequested || alarmRequested) {
+            nextSeg.hasNewData = false;
+            isVectorMoving = false;
+            isPlannerBusy = false;
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
         isVectorMoving = true; // Жестко взводим флаг физического старта движения!
 
         // Фиксируем эталонную базу
@@ -572,14 +687,46 @@ void motionTask(void * parameter) {
 }
 
 // ============================================================================
-// СТРУКТУРНЫЙ БЛОК: ВЫСОКОСКОРОСТНОЕ ДВУХФАЗНОЕ ПРЕРЫВАНИЕ ТАЙМЕРА (200 кГц)
+// СТРУКТУРНЫЙ БЛОК: ВЫСОКОСКОРОСТНОЕ ДВУХФАЗНОЕ ПРЕРЫВАНИЕ ТАЙМЕРА
 // ============================================================================
 
-// Флаг фазы таймера: true = нечетный такт (HIGH), false = четный такт (LOW)
-static volatile bool timerPhaseHigh = true;
+// Аварийная ветка ISR: только аппаратные действия и флаги.
+// Никаких changeState(), Preferences, Serial и String — всё это делает loop().
+static void IRAM_ATTR emergencyStopFromISR() {
+    motionStopRequested = true;
+    alarmRequested = true;
+
+    digitalWrite(MOTORS_ENABLE, HIGH); // Немедленно обесточить драйверы Leadshine
+    digitalWrite(RELE_SPINDLE, LOW);
+    digitalWrite(RELE_COOLANT, LOW);
+
+    digitalWrite(X_STEP_PIN, LOW);
+    digitalWrite(Y_STEP_PIN, LOW);
+    digitalWrite(Z_STEP_PIN, LOW);
+
+    // Best-effort: выбрасываем очередь. Генератор увидит motionStopRequested
+    // и прекратит запись; точную очистку выполнит requestMotionStop() в loop().
+    bufferTail = bufferHead;
+
+    isVectorMoving = false;
+    isPlannerBusy = false;
+    nextSeg.hasNewData = false;
+    timerPhaseHigh = true;
+}
 
 void IRAM_ATTR onTimerInterrupt() {
-    // Проверяем критические аварии, которые должны сработать ВСЕГДА
+    // Авария уже зафиксирована: драйверы обесточены, шаги заблокированы.
+    // Повторно не дёргаем пины каждые 10 мкс, пока loop() не обработает флаг.
+    if (alarmRequested) {
+        digitalWrite(X_STEP_PIN, LOW);
+        digitalWrite(Y_STEP_PIN, LOW);
+        digitalWrite(Z_STEP_PIN, LOW);
+        timerPhaseHigh = true;
+        return;
+    }
+
+    // Проверяем критические аварии, которые должны сработать ВСЕГДА,
+    // в том числе когда выдача шагов остановлена (IDLE/STOP/ALARM).
     bool criticalAlarm = (digitalRead(ESTOP_PIN) == HIGH || digitalRead(MOTORS_ALARM) == HIGH);
     
     // Линию концевиков подмешиваем к аварии ТОЛЬКО если сейчас не идет процедура хоуминга
@@ -588,17 +735,16 @@ void IRAM_ATTR onTimerInterrupt() {
     }
 
     if (criticalAlarm) {
-        digitalWrite(MOTORS_ENABLE, HIGH); // Немедленно обесточить драйверы Leadshine
-        
-        // Жестко сбрасываем буфер времени и останавливаем станок
-        bufferTail = bufferHead; 
-        isVectorMoving = false; // Мгновенно гасим физический статус движения
-        isPlannerBusy = false;  // Освобождаем конвейер данных
-        
-        timerPhaseHigh = true; // Сбрасываем фазу
-        
-        // Переводим станок в аварийный стейт ALARM на Ядре 0
-        changeState(STATE_ALARM); 
+        emergencyStopFromISR();
+        return;
+    }
+
+    // После STOP/ALARM шаги не выдаются вообще.
+    if (motionStopRequested) {
+        digitalWrite(X_STEP_PIN, LOW);
+        digitalWrite(Y_STEP_PIN, LOW);
+        digitalWrite(Z_STEP_PIN, LOW);
+        timerPhaseHigh = true;
         return;
     }
 
@@ -668,85 +814,223 @@ void IRAM_ATTR onTimerInterrupt() {
 // СТРУКТУРНЫЙ БЛОК: АВТОМАТИЧЕСКИЙ ПОИСК БАЗ СТАНКА (HOMING)
 // ============================================================================
 
-// Функция поиска базы для одной конкретной оси через кольцевой буфер времени
-bool homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps) {
-    const uint16_t HOMING_DELAY_TICKS = 50; // Жесткая задержка скорости хоуминга (эквивалент ~2 кГц)
-    
+// Период одного тика таймера, мкс (100 кГц). Нужен для расчёта таймаутов хоуминга.
+static const float HOMING_TICK_US = 10.0f;
+// 50 тиков на шаг = 0,5 мс -> ~2 кГц. Один шаг = одна пачка тиков.
+static const uint16_t HOMING_DELAY_TICKS = 50;
+// Пауза после остановки оси для гашения инерции фермы.
+static const unsigned long HOMING_SETTLE_MS = 100;
+
+// Проверка аварийных входов и запросов остановки во время хоуминга.
+static HomingResult homingCheckInputs() {
+    if (alarmRequested || digitalRead(ESTOP_PIN) == HIGH ||
+        digitalRead(MOTORS_ALARM) == HIGH || currentMachineState == STATE_ALARM) {
+        return HOMING_FAILED;
+    }
+    if (motionStopRequested) return HOMING_ABORTED;
+    return HOMING_OK;
+}
+
+// Ставит в кольцевой буфер один шаг нужной оси (пачку тиков ожидания).
+// Возвращает HOMING_OK, если такт записан; иначе — причину остановки.
+static HomingResult enqueueHomingStep(int stepPin, int dirBit) {
+    uint32_t nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
+    while (nextHead == bufferTail) {
+        HomingResult st = homingCheckInputs();
+        if (st != HOMING_OK) return st;
+        vTaskDelay(pdMS_TO_TICKS(1));
+        nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
+    }
+
+    for (uint16_t t = 0; t < HOMING_DELAY_TICKS; t++) {
+        StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
+        if (t == 0) {
+            if (stepPin == X_STEP_PIN) { cmd.stepX = 1; cmd.dirX = dirBit; }
+            if (stepPin == Y_STEP_PIN) { cmd.stepY = 1; cmd.dirY = dirBit; }
+            if (stepPin == Z_STEP_PIN) { cmd.stepZ = 1; cmd.dirZ = dirBit; }
+        }
+        cmd.valid = 1;
+        stepRingBuffer[bufferHead] = cmd;
+        bufferHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
+    }
+    return HOMING_OK;
+}
+
+// Ждёт слива кольцевого буфера, контролируя аварии и таймаут.
+static HomingResult waitHomingBufferDrain(unsigned long timeoutMs) {
+    unsigned long start = millis();
+    while (bufferTail != bufferHead) {
+        HomingResult st = homingCheckInputs();
+        if (st != HOMING_OK) return st;
+        if (millis() - start > timeoutMs) return HOMING_FAILED;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return HOMING_OK;
+}
+
+static float homingAxisTravelMm(int stepPin) {
+    if (stepPin == X_STEP_PIN) return fabsf(cfg.maxX - cfg.minX);
+    if (stepPin == Y_STEP_PIN) return fabsf(cfg.maxY - cfg.minY);
+    return fabsf(cfg.maxZ - cfg.minZ);
+}
+
+static float homingAxisStepsPerMm(int stepPin) {
+    float spm = cfg.stepsPerMmZ;
+    if (stepPin == X_STEP_PIN) spm = cfg.stepsPerMmX;
+    else if (stepPin == Y_STEP_PIN) spm = cfg.stepsPerMmY;
+    return (spm > 0.001f) ? spm : 100.0f;
+}
+
+// Функция поиска базы для одной конкретной оси через кольцевой буфер времени.
+// Всегда сбрасывает isHomingActive, чтобы ISR снова следил за концевиками.
+HomingResult homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps) {
     isHomingActive = true;
-    // Шаг 1: Едем в сторону датчика до физического срабатывания
+
+    // Ограничение хода и времени поиска: заведомо больше рабочего поля + запас.
+    float travelMm = homingAxisTravelMm(stepPin);
+    float stepsPerMm = homingAxisStepsPerMm(stepPin);
+    long maxSearchSteps = (long)((travelMm + 100.0f) * stepsPerMm);
+    if (maxSearchSteps < 1000) maxSearchSteps = 1000;
+
+    const float msPerStep = (float)HOMING_DELAY_TICKS * HOMING_TICK_US / 1000.0f;
+    unsigned long searchTimeoutMs = (unsigned long)((float)maxSearchSteps * msPerStep) + 10000UL;
+    unsigned long drainTimeoutMs  = 10000UL;
+
+    bool failed = false;
+    bool aborted = false;
+
+    // --- Шаг 1: едем в сторону датчика до физического срабатывания ---
+    unsigned long searchStart = millis();
+    long searchSteps = 0;
     while (digitalRead(endstopPin) == LOW) {
-        // Если оператор нажал E-STOP во время поиска баз — немедленно выходим
-        if (digitalRead(ESTOP_PIN) == HIGH) return false;
+        HomingResult st = homingCheckInputs();
+        if (st == HOMING_FAILED)  { failed = true; break; }
+        if (st == HOMING_ABORTED) { aborted = true; break; }
 
-        uint32_t nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
-        while (nextHead == bufferTail) { vTaskDelay(pdMS_TO_TICKS(1)); }
+        if (searchSteps >= maxSearchSteps || (millis() - searchStart) > searchTimeoutMs) {
+            Serial.println("HOMING: ERROR - endstop not reached in time.");
+            failed = true;
+            break;
+        }
 
-        // Формируем потактовую пачку времени для одного шага хоуминга
-        for (uint16_t t = 0; t < HOMING_DELAY_TICKS; t++) {
-            StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
-            if (t == 0) {
-                if (stepPin == X_STEP_PIN) { cmd.stepX = 1; cmd.dirX = (dirSign > 0) ? 1 : 0; }
-                if (stepPin == Y_STEP_PIN) { cmd.stepY = 1; cmd.dirY = (dirSign > 0) ? 1 : 0; }
-                if (stepPin == Z_STEP_PIN) { cmd.stepZ = 1; cmd.dirZ = (dirSign > 0) ? 1 : 0; }
+        st = enqueueHomingStep(stepPin, (dirSign > 0) ? 1 : 0);
+        if (st == HOMING_FAILED)  { failed = true; break; }
+        if (st == HOMING_ABORTED) { aborted = true; break; }
+        searchSteps++;
+    }
+
+    if (!failed && !aborted) {
+        HomingResult st = waitHomingBufferDrain(drainTimeoutMs);
+        if (st == HOMING_FAILED)  failed = true;
+        if (st == HOMING_ABORTED) aborted = true;
+    }
+
+    if (!failed && !aborted) {
+        vTaskDelay(pdMS_TO_TICKS(HOMING_SETTLE_MS));
+        HomingResult st = homingCheckInputs();
+        if (st == HOMING_FAILED)  failed = true;
+        if (st == HOMING_ABORTED) aborted = true;
+    }
+
+    // --- Шаг 2: обязательный целочисленный отъезд назад (Pull-off) ---
+    long pullOff = (pullOffSteps > 0) ? pullOffSteps : 0;
+    if (!failed && !aborted) {
+        unsigned long pullOffStart = millis();
+        unsigned long pullOffTimeoutMs = (unsigned long)((float)pullOff * msPerStep) + 5000UL;
+
+        for (long i = 0; i < pullOff; i++) {
+            HomingResult st = homingCheckInputs();
+            if (st == HOMING_FAILED)  { failed = true; break; }
+            if (st == HOMING_ABORTED) { aborted = true; break; }
+
+            if (millis() - pullOffStart > pullOffTimeoutMs) {
+                Serial.println("HOMING: ERROR - pull-off timeout.");
+                failed = true;
+                break;
             }
-            cmd.valid = 1;
-            stepRingBuffer[bufferHead] = cmd;
-            bufferHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
+
+            // Едем строго в противоположную сторону (разворачиваем dirSign)
+            st = enqueueHomingStep(stepPin, (dirSign > 0) ? 0 : 1);
+            if (st == HOMING_FAILED)  { failed = true; break; }
+            if (st == HOMING_ABORTED) { aborted = true; break; }
+        }
+
+        if (!failed && !aborted) {
+            HomingResult st = waitHomingBufferDrain(drainTimeoutMs);
+            if (st == HOMING_FAILED)  failed = true;
+            if (st == HOMING_ABORTED) aborted = true;
+        }
+
+        if (!failed && !aborted) {
+            vTaskDelay(pdMS_TO_TICKS(HOMING_SETTLE_MS));
+            // После отъезда концевик обязан отпустить. Если цепь осталась разомкнутой
+            // (залипший/неподключённый датчик) — это авария, а не успешная база.
+            if (digitalRead(endstopPin) == HIGH) {
+                Serial.println("HOMING: ERROR - endstop still active after pull-off.");
+                failed = true;
+            }
         }
     }
 
-    // Ждем, пока таймер полностью выгребет остатки шагов из буфера и мотор физически замрет
-    while (bufferTail != bufferHead) { vTaskDelay(pdMS_TO_TICKS(1)); }
-    vTaskDelay(pdMS_TO_TICKS(100)); // Короткая пауза для гашения инерции фермы
-
-    // Шаг 2: Обязательный целочисленный отъезд назад (Pull-off) для освобождения датчика
-    for (long i = 0; i < pullOffSteps; i++) {
-        uint32_t nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
-        while (nextHead == bufferTail) { vTaskDelay(pdMS_TO_TICKS(1)); }
-
-        for (uint16_t t = 0; t < HOMING_DELAY_TICKS; t++) {
-            StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
-            if (t == 0) {
-                // Едем строго в противоположную сторону (разворачиваем dirSign)
-                if (stepPin == X_STEP_PIN) { cmd.stepX = 1; cmd.dirX = (dirSign > 0) ? 0 : 1; }
-                if (stepPin == Y_STEP_PIN) { cmd.stepY = 1; cmd.dirY = (dirSign > 0) ? 0 : 1; }
-                if (stepPin == Z_STEP_PIN) { cmd.stepZ = 1; cmd.dirZ = (dirSign > 0) ? 0 : 1; }
-            }
-            cmd.valid = 1;
-            stepRingBuffer[bufferHead] = cmd;
-            bufferHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
-        }
-    }
-
-    // Снова ждем полной физической остановки
-    while (bufferTail != bufferHead) { vTaskDelay(pdMS_TO_TICKS(1)); }
-    
-    // Жестко зануляем физический и математический счетчик оси! База официально найдена.
-    axisSteps = 0; 
     isHomingActive = false;
-    return true;
+
+    if (failed) {
+        requestMotionStop();
+        return HOMING_FAILED;
+    }
+    if (aborted) {
+        requestMotionStop();
+        return HOMING_ABORTED;
+    }
+
+    // Жестко зануляем физический счетчик оси! База официально найдена.
+    axisSteps = 0;
+    return HOMING_OK;
 }
 
 // Главный последовательный автомат поиска баз ЧПУ (Вызывается из handleIdleCommands на Core 0)
 void runFullHoming() {
     changeState(STATE_HOMING);
+    // Переход мог быть отклонён (ALARM / запрет) — тогда хоуминг не начинаем.
+    if (currentMachineState != STATE_HOMING) return;
+
     isHomed = false;
+    isHomingActive = false;
+
+    // Таймер мог быть остановлен предыдущим STOP/ALARM.
+    if (!armMotionTimer()) {
+        changeState(STATE_ALARM);
+        return;
+    }
+
+    // Возвращает true, если ось можно двигать дальше.
+    auto homeOneAxis = [](int stepPin, int dirPin, int dirSign, volatile long &steps,
+                          long pullOff, const char* name) -> bool {
+        HomingResult res = homeAxis(stepPin, dirPin, dirSign, steps, ENDSTOPS_PIN, pullOff);
+        if (res == HOMING_OK) return true;
+
+        if (res == HOMING_FAILED) {
+            Serial.print("HOMING: axis ");
+            Serial.print(name);
+            Serial.println(" failed -> ALARM");
+            changeState(STATE_ALARM);
+        } else {
+            Serial.print("HOMING: axis ");
+            Serial.print(name);
+            Serial.println(" aborted by stop request.");
+        }
+        return false;
+    };
 
     // 1. Первой всегда строго вверх уходит безопасная ось Z, чтобы не сломать фрезу об прижимы
-    if (!homeAxis(Z_STEP_PIN, Z_DIR_PIN, cfg.homingDirZ, currentStepsZ, ENDSTOPS_PIN, cfg.pullOffZ)) {
-        changeState(STATE_ALARM); return;
-    }
+    if (!homeOneAxis(Z_STEP_PIN, Z_DIR_PIN, cfg.homingDirZ, currentStepsZ, cfg.pullOffZ, "Z")) return;
     plannerStepsZ = 0; // Синхронизируем базу планировщика
 
     // 2. Затем в базовый угол синхронно или последовательно уходят оси X и Y
-    if (!homeAxis(X_STEP_PIN, X_DIR_PIN, cfg.homingDirX, currentStepsX, ENDSTOPS_PIN, cfg.pullOffX)) {
-        changeState(STATE_ALARM); return;
-    }
+    if (!homeOneAxis(X_STEP_PIN, X_DIR_PIN, cfg.homingDirX, currentStepsX, cfg.pullOffX, "X")) return;
     plannerStepsX = 0;
 
-    if (!homeAxis(Y_STEP_PIN, Y_DIR_PIN, cfg.homingDirY, currentStepsY, ENDSTOPS_PIN, cfg.pullOffY)) {
-        changeState(STATE_ALARM); return;
-    }
+    if (!homeOneAxis(Y_STEP_PIN, Y_DIR_PIN, cfg.homingDirY, currentStepsY, cfg.pullOffY, "Y")) return;
     plannerStepsY = 0;
 
     // Все базы успешно привязаны

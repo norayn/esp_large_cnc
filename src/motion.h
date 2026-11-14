@@ -37,8 +37,26 @@ extern volatile long plannerStepsZ;
 // Динамический программный Override общей подачи со слайдера PyQt6 (1.0 = 100%)
 extern float pythonFeedrateOverride;
 
+// Немедленная остановка движения (STOP / RESET_ALARM / ALARM).
+// Останавливает таймер, очищает кольцевой буфер и синхронизирует базу планировщика
+// с фактическими счётчиками шагов. Вызывать только из контекста loop/задачи.
+void requestMotionStop();
+
+// true, пока движение остановлено и требует явного разрешения (prepareVectorSegment).
+bool isMotionStopRequested();
+
+// Забирает флаг аварии, установленный ISR. true = была авария, требуется changeState(ALARM).
+bool consumeAlarmRequest();
+
 // Объявление глобального объекта межъядерного обмена
 extern volatile InputSegment nextSeg;
+
+// Результат поиска базы одной оси
+enum HomingResult {
+    HOMING_OK = 0,     // база найдена, счётчик оси обнулён
+    HOMING_ABORTED,    // мягкая остановка (STOP/смена состояния), не авария
+    HOMING_FAILED      // ESTOP/MOTORS_ALARM/таймаут/концевик -> нужен ALARM
+};
 
 // Прототипы функций модуля движения
 void initMotion();
@@ -46,7 +64,7 @@ void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_S
                           float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec);
 void updateCurvaturePoint(int index, float y_off, float z_off);
 CorrectionPoint getCorrection(float currentX);
-bool homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps);
+HomingResult homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps);
 void runFullHoming();
 void IRAM_ATTR onTimerInterrupt();
 void updateFeedrateFading();

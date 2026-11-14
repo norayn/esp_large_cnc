@@ -47,6 +47,7 @@ void changeState(MachineState newState) {
 
     switch (newState) {
         case STATE_ALARM:
+            requestMotionStop();
             isVectorMoving = false;
             digitalWrite(MOTORS_ENABLE, HIGH); 
             digitalWrite(RELE_SPINDLE, LOW); 
@@ -57,7 +58,12 @@ void changeState(MachineState newState) {
             preferences.end();
             break;
         case STATE_IDLE:
-            digitalWrite(MOTORS_ENABLE, LOW); 
+            // Любой переход в IDLE — это остановка: очередь шагов сбрасывается,
+            // остаток кадра не доигрывается и не «ползёт» на 0,1 мм/с.
+            requestMotionStop();
+            if (digitalRead(ESTOP_PIN) != HIGH && digitalRead(MOTORS_ALARM) != HIGH) {
+                digitalWrite(MOTORS_ENABLE, LOW);
+            }
             break;
         case STATE_GCODE_UPLOAD:
             isVectorMoving = false;
@@ -69,6 +75,15 @@ void changeState(MachineState newState) {
 }
 
 void checkHardwareSecurity() {
+    // Аварию мог обнаружить таймерный ISR: он только обесточил драйверы
+    // и выставил флаг. FSM, NVS и Serial обновляем здесь, в контексте loop().
+    if (consumeAlarmRequest()) {
+        if (currentMachineState != STATE_ALARM) {
+            changeState(STATE_ALARM);
+            Serial.println("CRITICAL: Hardware alarm triggered by timer ISR!");
+        }
+    }
+
     // Аппаратная кнопка аварийной остановки (E-STOP) должна работать ВСЕГДА
     if (digitalRead(ESTOP_PIN) == HIGH) { // Предположим, HIGH = нажата
         if (currentMachineState != STATE_ALARM) {
