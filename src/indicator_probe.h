@@ -11,7 +11,7 @@ void initIndicatorModule();
 float readDialIndicator();
 
 // Функция запуска комплексного замера геометрии вдоль оси X
-// На входе: начальная координата X, конечная X, шаг замера, скорость подачи
-void runGeometryScan(float startX, float endX, float stepX, float feedRate);
+// На входе: начальная координата X, конечная X, шаг замера, скорость подачи (мм/с)
+void runGeometryScan(float startX, float endX, float stepX, float feedRateMM_Sec);
 
 #endif

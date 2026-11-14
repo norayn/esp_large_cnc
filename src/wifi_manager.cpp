@@ -164,10 +164,11 @@ static bool handleGlobalCommands(const String& cmd) {
 // 2. Команды управления в режиме ожидания (IDLE)
 static bool handleIdleCommands(const String& cmd) {
     if (cmd == "SET_HOMED_DEBUG") {
-        currentStepsX = 0;
-        currentStepsY = 0;
-        currentStepsZ = 0;
-        isHomed = true; // Снимаем замок станка принудительно!
+        // Не обнуляем currentSteps* без физического движения (P0-4): иначе
+        // телеметрия и первый JOG считают от неверной позиции. Только снимаем
+        // блокировку и синхронизируем математику планировщика с фактом.
+        syncPlannerToActual();
+        isHomed = true;
         sendToWiFiClient("STATUS: DEBUG HOMING SUCCESSFUL. Machine unlocked.");
         return true;
     }
@@ -236,7 +237,10 @@ static bool handleIdleCommands(const String& cmd) {
     if (cmd == "GET_LAST_ABORTED_LINE") { sendToWiFiClient("LAST_LINE:" + String(cfg.lastExecutedLine)); return true; }
     if (cmd.startsWith("JOG:")) {
         if (!changeState(STATE_JOGGING)) return true; // отказ: станок не двигаем
-        processSingleManualCommand(cmd.substring(4)); 
+        if (!processSingleManualCommand(cmd.substring(4))) {
+            // Команда/цель отклонена — возвращаем управление, не оставляя JOGGING.
+            changeState(STATE_IDLE);
+        }
         //changeState(STATE_IDLE);
         return true;
     }
@@ -256,11 +260,28 @@ static bool handleIdleCommands(const String& cmd) {
             float startX = data.substring(0, idx1).toFloat();
             float endX   = data.substring(idx1 + 1, idx2).toFloat();
             float stepX  = data.substring(idx2 + 1, idx3).toFloat();
-            float speed  = data.substring(idx3 + 1).toFloat();
+            // P0-7: SPEED в SCAN_GEOMETRY — мм/мин (как в GUI и G-коде).
+            float speedMmMin = data.substring(idx3 + 1).toFloat();
+
+            if (!isfinite(startX) || !isfinite(endX) || !isfinite(stepX) ||
+                !isfinite(speedMmMin) || stepX <= 0.0f || startX == endX ||
+                speedMmMin < 1.0f || speedMmMin > 20000.0f) {
+                String err = "ERROR: SCAN_GEOMETRY requires finite START/END, STEP>0 and SPEED 1..20000 mm/min.";
+                Serial.println(err); sendToWiFiClient(err);
+                return true;
+            }
+
+            // P0-8: скан не начинаем, если любая крайняя точка вне поля.
+            String limitErr;
+            if (!validateMachineTarget(startX, 0.0f, 0.0f, &limitErr) ||
+                !validateMachineTarget(endX, 0.0f, 0.0f, &limitErr)) {
+                Serial.println(limitErr); sendToWiFiClient(limitErr);
+                return true;
+            }
 
             if (!changeState(STATE_CALIBRATION)) return true; // отказ: ERROR уже отправлен
-            extern void runGeometryScan(float startX, float endX, float stepX, float feedRate);
-            runGeometryScan(startX, endX, stepX, speed);
+            extern void runGeometryScan(float startX, float endX, float stepX, float feedRateMM_Sec);
+            runGeometryScan(startX, endX, stepX, speedMmMin / 60.0f);
             if (currentMachineState == STATE_CALIBRATION) changeState(STATE_IDLE);
             return true; // Команда успешно выполнена
         }

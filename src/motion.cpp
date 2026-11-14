@@ -99,6 +99,15 @@ static bool armMotionTimer() {
     return true;
 }
 
+// Математическая база планировщика = фактическое положение моторов.
+// На ESP32 32-битные выровненные volatile-переменные читаются/пишутся атомарно,
+// поэтому отдельная критическая секция здесь не нужна.
+void syncPlannerToActual() {
+    plannerStepsX = currentStepsX;
+    plannerStepsY = currentStepsY;
+    plannerStepsZ = currentStepsZ;
+}
+
 // Мягкая остановка: выдача шагов прекращается сразу, очередь сбрасывается,
 // математическая база планировщика приравнивается к фактической позиции.
 void requestMotionStop() {
@@ -109,9 +118,7 @@ void requestMotionStop() {
     noInterrupts();
     bufferHead = 0;
     bufferTail = 0;
-    plannerStepsX = currentStepsX;
-    plannerStepsY = currentStepsY;
-    plannerStepsZ = currentStepsZ;
+    syncPlannerToActual();
     interrupts();
 
     digitalWrite(X_STEP_PIN, LOW);
@@ -191,22 +198,70 @@ CorrectionPoint getCorrection(float currentX) {
 }
 
 // ============================================================================
+// СТРУКТУРНЫЙ БЛОК: ПРОГРАММНЫЕ ЛИМИТЫ (SOFT LIMITS)
+// ============================================================================
+
+// Допуск на округление float/шагов, мм. Не является «запасом» рабочей зоны.
+static const float SOFT_LIMIT_TOL_MM = 0.01f;
+
+bool validateMachineTarget(float x, float y, float z, String* reason) {
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z)) {
+        if (reason) *reason = "ERROR: Non-finite target coordinate.";
+        return false;
+    }
+
+    // В motionTask лазерная коррекция применяется к Y/Z, поэтому лимиты
+    // проверяем уже с её учётом. При некорректном конфиге карту не трогаем.
+    CorrectionPoint corr = {0.0f, 0.0f};
+    if (cfg.laserGridStep > 0.0f && cfg.laserMapSize > 0) corr = getCorrection(x);
+
+    const float mx = x;
+    const float my = y + corr.y_offset;
+    const float mz = z + corr.z_offset;
+
+    struct AxisLimit {
+        const char* name;
+        float value;
+        float lo;
+        float hi;
+    };
+    const AxisLimit axes[] = {
+        {"X", mx, cfg.minX, cfg.maxX},
+        {"Y", my, cfg.minY, cfg.maxY},
+        {"Z", mz, cfg.minZ, cfg.maxZ},
+    };
+
+    for (const AxisLimit &a : axes) {
+        if (a.value < a.lo - SOFT_LIMIT_TOL_MM || a.value > a.hi + SOFT_LIMIT_TOL_MM) {
+            if (reason) {
+                *reason = "ERROR: Soft limit " + String(a.name) + "=" + String(a.value, 3) +
+                          " mm outside [" + String(a.lo, 3) + ".." + String(a.hi, 3) + "]";
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+// ============================================================================
 // СТРУКТУРНЫЙ БЛОК: НЕБЛОКИРУЮЩАЯ ПЕРЕДАЧА КАДРА МЕЖДУ ЯДРАМИ (Core 0)
 // ============================================================================
 
-void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec, 
+bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec,
                           float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec) {
-    
-    if (!armMotionTimer()) return;
+    // Защита от обхода проверки: даже если вызывающий забыл validateMachineTarget().
+    if (!validateMachineTarget(newX, newY, newZ)) return false;
+
+    if (!armMotionTimer()) return false;
 
     // Блокировка от затирания: ждем, пока Ядро 1 заберет предыдущий пакет
     while (nextSeg.hasNewData) { 
-        if (motionStopRequested || alarmRequested) return;
+        if (motionStopRequested || alarmRequested) return false;
         delay(1); 
     }
 
     // Остановка могла прийти, пока ждали освобождения посредника.
-    if (motionStopRequested || alarmRequested) return;
+    if (motionStopRequested || alarmRequested) return false;
     
     // Перекладываем геометрию и скорости кадра в структуру межъядерного обмена
     nextSeg.x = newX; 
@@ -225,6 +280,7 @@ void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_S
     nextSeg.hasNewData = true; 
     isPlannerBusy  = true; 
     isVectorMoving = true;
+    return true;
 }
 
 // ============================================================================

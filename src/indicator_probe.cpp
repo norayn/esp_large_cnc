@@ -56,19 +56,35 @@ float readDialIndicator() {
 }
 
 
-void runGeometryScan(float startX, float endX, float stepX, float feedRate) {
+void runGeometryScan(float startX, float endX, float stepX, float feedRateMM_Sec) {
     Serial.println("=== START GEOMETRY SCAN ===");
     sendToWiFiClient("=== START GEOMETRY SCAN ===");
     Serial.println("X_POS;DIAL_INDICATOR;LASER_Y;LASER_Z");
     sendToWiFiClient("X_POS;DIAL_INDICATOR;LASER_Y;LASER_Z");
+
+    // P0-4: скан стартует от фактической позиции, а не от старой базы.
+    syncPlannerToActual();
 
     // Вычисляем направление движения
     int stepsCount = abs((endX - startX) / stepX) + 1;
     float currentX = startX;
 
     for (int i = 0; i < stepsCount; i++) {
+        if (currentMachineState != STATE_CALIBRATION) return; // STOP/RESET во время скана
+
+        // P0-8: каждая точка проверяется до постановки в очередь.
+        String limitErr;
+        if (!validateMachineTarget(currentX, 0.0f, 0.0f, &limitErr)) {
+            Serial.println(limitErr);
+            sendToWiFiClient(limitErr);
+            return;
+        }
+
         // Командуем планировщику ехать в точку замера (Y и Z удерживаем в нулях)
-        prepareVectorSegment(currentX, 0.0f, 0.0f, feedRate, cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed);
+        if (!prepareVectorSegment(currentX, 0.0f, 0.0f, feedRateMM_Sec,
+                                  cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed)) {
+            return;
+        }
         while (isPlannerBusy) {
             checkHardwareSecurity();
             if (currentMachineState == STATE_ALARM) return;
@@ -89,7 +105,7 @@ void runGeometryScan(float startX, float endX, float stepX, float feedRate) {
 
         while (millis() - sWait < 1500) { // Таймаут 1.5 сек
             checkHardwareSecurity();
-            if (currentMachineState == STATE_ALARM) return;
+            if (currentMachineState != STATE_CALIBRATION) return;
             
             if (Serial2.available() > 0) {
                 char c = Serial2.read();

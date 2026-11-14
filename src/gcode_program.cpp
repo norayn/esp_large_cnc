@@ -117,6 +117,15 @@ void executeNextProgramStep() {
         }
 
         
+        // P0-8: не запускаем кадр за пределы рабочего поля и не двигаемся частично.
+        String limitErr;
+        if (!validateMachineTarget(machineX, machineY, machineZ, &limitErr)) {
+            Serial.println(limitErr);
+            sendToWiFiClient(limitErr);
+            changeState(STATE_IDLE); // остановить программу, а не ехать дальше
+            return;
+        }
+
         // Передаем 7 параметров. Скорости v_start и v_end уже лежат в структуре cmd,
         // так как их рассчитал и прислал Look-Ahead модуль на Python!
         prepareVectorSegment(machineX, machineY, machineZ, cmd.f, cfg.maxAcceleration, cmd.v_start, cmd.v_end);
@@ -145,26 +154,57 @@ void executeNextProgramStep() {
     }
 }
 
-void processSingleManualCommand(String line) {
+// Протокольные пределы JOG: F задаётся в мм/мин, как в обычном G-коде.
+static const float JOG_MIN_FEED_MM_MIN = 1.0f;
+static const float JOG_MAX_FEED_MM_MIN = 20000.0f;
+
+bool processSingleManualCommand(String line) {
     line.toUpperCase();
     uint8_t type = 255;
     if (line.indexOf("G0") != -1) type = 0;
     if (line.indexOf("G1") != -1) type = 1;
+    if (type == 0 || type == 1) {
+        // P0-4: первый JOG после аварии/отладки не должен считать дельту
+        // от устаревшей математической базы.
+        syncPlannerToActual();
+    }
     
     // Вычисляем целевую позицию JOG перемещения (если координата пропущена — остаемся на месте в WCS)
     float x = (line.indexOf('X') != -1) ? line.substring(line.indexOf('X')+1).toFloat() : (currentStepsX / cfg.stepsPerMmX) - wcsOffset.x;
     float y = (line.indexOf('Y') != -1) ? line.substring(line.indexOf('Y')+1).toFloat() : (currentStepsY / cfg.stepsPerMmY) - wcsOffset.y;
     float z = (line.indexOf('Z') != -1) ? line.substring(line.indexOf('Z')+1).toFloat() : (currentStepsZ / cfg.stepsPerMmZ) - wcsOffset.z;
-    float f = (line.indexOf('F') != -1) ? line.substring(line.indexOf('F')+1).toFloat() : cfg.defaultFeedRate;
+    // P0-7: F в JOG — мм/мин (как в G-коде и в GUI), внутри переводим в мм/с.
+    float f_mm_min = (line.indexOf('F') != -1) ? line.substring(line.indexOf('F')+1).toFloat() : cfg.defaultFeedRate;
+
+    if (type != 0 && type != 1) {
+        Serial.println("ERROR: JOG requires G0 or G1.");
+        sendToWiFiClient("ERROR: JOG requires G0 or G1.");
+        return false;
+    }
+    if (!isfinite(f_mm_min) || f_mm_min < JOG_MIN_FEED_MM_MIN || f_mm_min > JOG_MAX_FEED_MM_MIN) {
+        String err = "ERROR: JOG feed must be " + String(JOG_MIN_FEED_MM_MIN, 1) + ".." +
+                     String(JOG_MAX_FEED_MM_MIN, 0) + " mm/min.";
+        Serial.println(err);
+        sendToWiFiClient(err);
+        return false;
+    }
 
     float v_jog_base = cfg.minVectorSpeed; 
 
-    if (type == 0 || type == 1) {
-        float machineX = x + wcsOffset.x;
-        float machineY = y + wcsOffset.y;
-        float machineZ = z + wcsOffset.z;
-        prepareVectorSegment(machineX, machineY, machineZ, f, cfg.maxAcceleration, v_jog_base, v_jog_base);
+    float machineX = x + wcsOffset.x;
+    float machineY = y + wcsOffset.y;
+    float machineZ = z + wcsOffset.z;
+
+    // P0-8: точка за пределами рабочего поля не ставится в очередь вообще.
+    String limitErr;
+    if (!validateMachineTarget(machineX, machineY, machineZ, &limitErr)) {
+        Serial.println(limitErr);
+        sendToWiFiClient(limitErr);
+        return false;
     }
+
+    return prepareVectorSegment(machineX, machineY, machineZ, f_mm_min / 60.0f,
+                                cfg.maxAcceleration, v_jog_base, v_jog_base);
 }
 
 void setAlignmentPoint(char pointLetter) {
@@ -235,9 +275,7 @@ bool startProgramExecution() {
 
     // ЖЕСТКИЙ HANDSHAKE БАЗЫ: Перед запуском первого кадра УП 
     // приравниваем виртуальные оси планировщика к реальному положению моторов на столе
-    plannerStepsX = currentStepsX;
-    plannerStepsY = currentStepsY;
-    plannerStepsZ = currentStepsZ;
+    syncPlannerToActual();
 
     currentCommandIndex = 0; // Сброс указателя на начало массива в ОЗУ
     if (!changeState(STATE_RUNNING)) return false;

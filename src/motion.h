@@ -48,6 +48,14 @@ bool isMotionStopRequested();
 // Забирает флаг аварии, установленный ISR. true = была авария, требуется changeState(ALARM).
 bool consumeAlarmRequest();
 
+// Приравнивает математическую базу планировщика к фактическим счётчикам шагов.
+// Вызывать перед JOG/стартом УП, после аварии и после SET_HOMED_DEBUG.
+void syncPlannerToActual();
+
+// Проверка точки в машинных координатах с учётом лазерной поправки Y/Z.
+// false = координата не конечна или выходит за minX…maxZ; reason — текст ошибки.
+bool validateMachineTarget(float x, float y, float z, String* reason = nullptr);
+
 // Объявление глобального объекта межъядерного обмена
 extern volatile InputSegment nextSeg;
 
@@ -60,7 +68,8 @@ enum HomingResult {
 
 // Прототипы функций модуля движения
 void initMotion();
-void prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec, 
+// false = кадр не поставлен в очередь (стоп/авария/некорректная цель).
+bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec,
                           float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec);
 void updateCurvaturePoint(int index, float y_off, float z_off);
 CorrectionPoint getCorrection(float currentX);

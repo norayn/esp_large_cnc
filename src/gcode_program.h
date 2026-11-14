@@ -58,8 +58,8 @@ void deactivateAlignmentExternal();
 // ГЛАВНЫЙ ИСПОЛНИТЕЛЬ: Выдергивает команду из буфера и распределяет её по модулям
 void executeNextProgramStep();
 
-// Обработчик одиночных ручных команд (JOG)
-void processSingleManualCommand(String line);
+// Обработчик одиночных ручных команд (JOG). false = команда отклонена.
+bool processSingleManualCommand(String line);
 
 // true = программа запущена; false = отказ (ALARM, нет хоуминга или пустой буфер).
 bool startProgramExecution();
