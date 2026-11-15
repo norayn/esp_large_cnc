@@ -49,8 +49,9 @@ volatile float smoothedFeedrateOverride = 1.0f;
 // Переменная плавного аппаратного ограничения скорости для паузы (в мм/сек)
 volatile float virtualSpeedLimit = 1000.0f; // Изначально открыт на максимум
 
-// Флаг, сигнализирующий, что генератор DDA был заморожен в мертвой точке паузы
-static bool isGeneratorSuspendedOnHold = false;
+// Флаг, сигнализирующий, что генератор DDA был заморожен в мертвой точке паузы.
+// Пишется motionTask (Core 1) и сбрасывается requestMotionStop() (Core 0).
+static volatile bool isGeneratorSuspendedOnHold = false;
 
 // Глобальное зеркало текущей скорости DDA для связи между ядрами
 volatile float sharedCurrentVelocity = 0.0f;
@@ -77,6 +78,22 @@ static CorrectionPoint curvatureMap[250];
 // Объявление структуры-посредника неблокирующего обмена кадрами между Ядром 0 и Ядром 1
 volatile InputSegment nextSeg = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
 
+// ============================================================================
+// МЕЖЪЯДЕРНАЯ СИНХРОНИЗАЦИЯ (P1-2)
+// ============================================================================
+// ringMux защищает индексы/ячейки кольцевого буфера и тройку plannerSteps*
+// при обмене между Core 0 (homing/stop) и Core 1 (ISR). motionTask пишет
+// кольцо на том же ядре, что и ISR, поэтому ему отдельный лок не нужен.
+static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
+
+// xferMux защищает передачу кадра nextSeg между Core 0 (producer) и Core 1
+// (motionTask). Вместе с hasNewData он закрывает окно «стоп во время передачи».
+static portMUX_TYPE xferMux = portMUX_INITIALIZER_UNLOCKED;
+
+// true, пока motionTask реально генерирует шаги текущего кадра. По нему
+// requestMotionStop() на Core 0 понимает, что кольцо уже никто не пишет.
+static volatile bool isMotionGenerating = false;
+
 
 // ============================================================================
 // СТРУКТУРНЫЙ БЛОК: ОСТАНОВКА ДВИЖЕНИЯ И АВАРИЙНЫЕ ЗАПРОСЫ
@@ -88,11 +105,12 @@ static bool armMotionTimer() {
     if (currentMachineState == STATE_ALARM || alarmRequested) return false;
 
     if (motionStopRequested) {
-        noInterrupts();
+        // ISR живёт на Core 1, поэтому noInterrupts() здесь не работает.
+        portENTER_CRITICAL(&ringMux);
         bufferHead = 0;
         bufferTail = 0;
         motionStopRequested = false;
-        interrupts();
+        portEXIT_CRITICAL(&ringMux);
     }
 
     // Фазу таймера здесь не трогаем: ISR сам завершит текущий импульс STEP.
@@ -100,13 +118,20 @@ static bool armMotionTimer() {
     return true;
 }
 
-// Математическая база планировщика = фактическое положение моторов.
-// На ESP32 32-битные выровненные volatile-переменные читаются/пишутся атомарно,
-// поэтому отдельная критическая секция здесь не нужна.
-void syncPlannerToActual() {
+// Копия базы под уже взятым ringMux (чтобы не брать лок повторно).
+static void syncPlannerToActualLocked() {
     plannerStepsX = currentStepsX;
     plannerStepsY = currentStepsY;
     plannerStepsZ = currentStepsZ;
+}
+
+// Математическая база планировщика = фактическое положение моторов.
+// Вызывать только когда движение остановлено: во время кадра plannerSteps*
+// уже указывает на конец поставленных кадров.
+void syncPlannerToActual() {
+    portENTER_CRITICAL(&ringMux);
+    syncPlannerToActualLocked();
+    portEXIT_CRITICAL(&ringMux);
 }
 
 // Мягкая остановка: выдача шагов прекращается сразу, очередь сбрасывается,
@@ -116,11 +141,30 @@ void requestMotionStop() {
 
     if (cncTimer != nullptr) timerAlarmDisable(cncTimer);
 
-    noInterrupts();
+    // Отменяем подготовленный, но ещё не принятый кадр. Лок закрывает окно,
+    // когда motionTask уже собирается взвести isMotionGenerating.
+    portENTER_CRITICAL(&xferMux);
+    nextSeg.hasNewData = false;
+    portEXIT_CRITICAL(&xferMux);
+
+    // Ждём, пока генератор на Core 1 корректно прервёт текущий кадр.
+    const unsigned long STOP_WAIT_MS = 100;
+    unsigned long waitStart = millis();
+    while (isMotionGenerating && (millis() - waitStart) < STOP_WAIT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (isMotionGenerating) {
+        Serial.println("WARNING: motion generator did not stop in time; forcing stop.");
+    }
+    __sync_synchronize();
+
+    // Генератор больше не пишет в кольцо: очищаем очередь и синхронизируем
+    // математическую базу с фактическим положением.
+    portENTER_CRITICAL(&ringMux);
     bufferHead = 0;
     bufferTail = 0;
-    syncPlannerToActual();
-    interrupts();
+    syncPlannerToActualLocked();
+    portEXIT_CRITICAL(&ringMux);
 
     digitalWrite(X_STEP_PIN, LOW);
     digitalWrite(Y_STEP_PIN, LOW);
@@ -130,7 +174,6 @@ void requestMotionStop() {
     isVectorMoving = false;
     isPlannerBusy = false;
     isGeneratorSuspendedOnHold = false;
-    nextSeg.hasNewData = false;
 
     // Таймер снова включаем: ISR шагов не выдаёт (motionStopRequested), но
     // продолжает следить за ESTOP/MOTORS_ALARM независимо от loop().
@@ -264,7 +307,9 @@ bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_S
     // Остановка могла прийти, пока ждали освобождения посредника.
     if (motionStopRequested || alarmRequested) return false;
     
-    // Перекладываем геометрию и скорости кадра в структуру межъядерного обмена
+    // Публикуем кадр атомарно относительно Core 1: либо motionTask увидит
+    // старый hasNewData=false, либо уже полностью заполненную структуру.
+    portENTER_CRITICAL(&xferMux);
     nextSeg.x = newX; 
     nextSeg.y = newY; 
     nextSeg.z = newZ;
@@ -277,10 +322,15 @@ bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_S
     nextSeg.v_start = vStartMM_Sec;         
     nextSeg.v_end = vEndMM_Sec;             
     
-    // Атомарная отмашка для потока Ядра 1 и взвод флага движения для main.cpp
-    nextSeg.hasNewData = true; 
-    isPlannerBusy  = true; 
+    // Флаги движения взводим ДО публикации кадра: иначе Core 1 может успеть
+    // обработать и опустошить кадр, а затем мы перезапишем isPlannerBusy=true.
+    isPlannerBusy  = true;
     isVectorMoving = true;
+
+    // Атомарная отмашка для потока Ядра 1
+    nextSeg.hasNewData = true;
+    portEXIT_CRITICAL(&xferMux);
+
     return true;
 }
 
@@ -289,6 +339,8 @@ bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_S
 // ============================================================================
 
 void motionTask(void * parameter) {
+    Serial.printf("SYSTEM: motionTask started on Core %d\n", xPortGetCoreID());
+
     // Внутренняя фиксированная частота работы нашего двухфазного таймера (200 кГц)
     const float TIMER_FREQ = 200000.0f; 
     
@@ -299,35 +351,73 @@ void motionTask(void * parameter) {
 
     while (true) {
         // Остановка/авария: не начинаем новый кадр и не трогаем буфер.
+        // Флаг останова проверяем повторно под xferMux: Core 0 мог уже снять
+        // STOP и опубликовать новый кадр, пока мы читали флаг.
         if (motionStopRequested || alarmRequested) {
-            nextSeg.hasNewData = false;
-            isVectorMoving = false;
-            isPlannerBusy = false;
-            vTaskDelay(pdMS_TO_TICKS(1));
+            bool stillStopped;
+            portENTER_CRITICAL(&xferMux);
+            stillStopped = (motionStopRequested || alarmRequested);
+            if (stillStopped) {
+                nextSeg.hasNewData = false;
+                isMotionGenerating = false;
+                isVectorMoving = false;
+                isPlannerBusy = false;
+            }
+            portEXIT_CRITICAL(&xferMux);
+
+            if (stillStopped) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
             continue;
         }
 
         // --- 4.1.1. ОПРОС И БЛОКИРОВКА МЕЖЪЯДЕРНОЙ ОЧЕРЕДИ ---
-        if (!nextSeg.hasNewData) {
-            // Если в кольцевом буфере физически кончились шаги, сигнализируем Ядру 0 в main.cpp
-            if (bufferTail == bufferHead) {
-                isPlannerBusy = false;
-            }
+        // Снимок кадра и handshake выполняются под xferMux: Core 0 не сможет
+        // сбросить hasNewData между проверкой и взводом isMotionGenerating.
+        float nX = 0.0f, nY = 0.0f, nZ = 0.0f, accel = 0.0f;
+        float v_max = 0.0f, v_start = 0.0f, v_end = 0.0f;
+        bool hasSegment = false;
+
+        portENTER_CRITICAL(&xferMux);
+        if (nextSeg.hasNewData) {
+            nX = nextSeg.x;
+            nY = nextSeg.y;
+            nZ = nextSeg.z;
+            accel = nextSeg.accel;
+            v_max   = nextSeg.v_frame; // Ограничение подачи кадра от CAM
+            v_start = nextSeg.v_start; // Скорость входа от Look-Ahead Python
+            v_end   = nextSeg.v_end;   // Скорость выхода на стыке угла от Look-Ahead Python
+
+            nextSeg.hasNewData = false; // Мгновенный Handshake: освобождаем ячейку для Ядра 0
+            isMotionGenerating = true;
+            hasSegment = true;
+        } else if (bufferTail == bufferHead) {
+            // Новых данных нет и кольцо пусто. Проверка и сброс isPlannerBusy
+            // под тем же xferMux, что и публикация кадра: иначе Core 0 может
+            // опубликовать кадр между проверкой и записью false.
+            isPlannerBusy = false;
+        }
+        portEXIT_CRITICAL(&xferMux);
+
+        if (!hasSegment) {
             vTaskDelay(pdMS_TO_TICKS(1)); // Неблокирующее ожидание FreeRTOS (1 мс)
             continue;
         }
 
-        // --- 4.1.2. ИЗВЛЕЧЕНИЕ ПАРАМЕТРОВ КАДРА И СКОРОСТЕЙ (в мм/сек) ---
-        float nX = nextSeg.x; 
-        float nY = nextSeg.y; 
-        float nZ = nextSeg.z;
-        float accel = nextSeg.accel;
-        
-        float v_max   = nextSeg.v_frame; // Ограничение подачи кадра от CAM
-        float v_start = nextSeg.v_start; // Скорость входа от Look-Ahead Python
-        float v_end   = nextSeg.v_end;   // Скорость выхода на стыке угла от Look-Ahead Python
-        
-        nextSeg.hasNewData = false;      // Мгновенный Handshake: освобождаем ячейку для Ядра 0
+        // STOP/ALARM могли прийти сразу после handshake.
+        if (motionStopRequested || alarmRequested) {
+            portENTER_CRITICAL(&xferMux);
+            isMotionGenerating = false; // отпускаем requestMotionStop()
+            // Если Core 0 уже успел снять STOP и опубликовать новый кадр,
+            // его флаги не трогаем — обработаем на следующей итерации.
+            if (!nextSeg.hasNewData) {
+                isVectorMoving = false;
+                isPlannerBusy = false;
+            }
+            portEXIT_CRITICAL(&xferMux);
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
 
         // --- 4.1.3. ОПТИЧЕСКАЯ ЛАЗЕРНАЯ КОМПЕНСАЦИЯ ПРОВИСА ФЕРМЫ ---
         CorrectionPoint corr = getCorrection(nX);
@@ -340,10 +430,19 @@ void motionTask(void * parameter) {
         long targetStepsY = realMachineY * cfg.stepsPerMmY;
         long targetStepsZ = realMachineZ * cfg.stepsPerMmZ;
 
-        // Вычисляем чистые дельты перемещения строго от идеальной математической базы прошлого кадра
-        long totalDeltaX = targetStepsX - plannerStepsX;
-        long totalDeltaY = targetStepsY - plannerStepsY;
-        long totalDeltaZ = targetStepsZ - plannerStepsZ;
+        // Вычисляем чистые дельты перемещения строго от идеальной математической базы
+        // прошлого кадра. Снимок тройки берём под ringMux, чтобы Core 0 не изменил
+        // plannerSteps* между осями (syncPlannerToActual/стоп).
+        long baseStepsX, baseStepsY, baseStepsZ;
+        portENTER_CRITICAL(&ringMux);
+        baseStepsX = plannerStepsX;
+        baseStepsY = plannerStepsY;
+        baseStepsZ = plannerStepsZ;
+        portEXIT_CRITICAL(&ringMux);
+
+        long totalDeltaX = targetStepsX - baseStepsX;
+        long totalDeltaY = targetStepsY - baseStepsY;
+        long totalDeltaZ = targetStepsZ - baseStepsZ;
 
         long absDeltaX = labs(totalDeltaX);
         long absDeltaY = labs(totalDeltaY);
@@ -356,6 +455,7 @@ void motionTask(void * parameter) {
 
         // Защита от пустых кадров (команды шпинделя, охлаждения и т.д.)
         if (maxSegmentSteps == 0) {
+            isMotionGenerating = false;
             continue; 
         }
 
@@ -458,9 +558,9 @@ void motionTask(void * parameter) {
         // Текущая физическая скорость вектора в начале кадра (мм/сек)
         float currentVelocity = v_start; 
 
-        localStepsX = plannerStepsX;
-        localStepsY = plannerStepsY;
-        localStepsZ = plannerStepsZ;
+        localStepsX = baseStepsX;
+        localStepsY = baseStepsY;
+        localStepsZ = baseStepsZ;
 
         bool frameAborted = false;
 
@@ -714,7 +814,11 @@ void motionTask(void * parameter) {
                 
                     // Физически записываем структуру в оперативную память кольцевого буфера
                     stepRingBuffer[bufferHead] = cmd;
-                
+
+                    // Барьер: содержимое ячейки обязано стать видимым до сдвига
+                    // головы, иначе ISR может прочитать недописанный такт.
+                    __sync_synchronize();
+
                     // Сдвигаем индекс головы кольца вперед
                     bufferHead = nextHead;
                 }
@@ -725,19 +829,28 @@ void motionTask(void * parameter) {
         // Остановка во время генерации: кадр отбрасывается, plannerSteps уже
         // синхронизирован с фактическими счётчиками в requestMotionStop().
         if (frameAborted || motionStopRequested || alarmRequested) {
-            nextSeg.hasNewData = false;
-            isVectorMoving = false;
-            isPlannerBusy = false;
+            portENTER_CRITICAL(&xferMux);
+            isMotionGenerating = false; // отпускаем requestMotionStop()
+            // Новый кадр мог быть опубликован сразу после снятия STOP —
+            // не затираем его флаги и обработаем на следующей итерации.
+            if (!nextSeg.hasNewData) {
+                isVectorMoving = false;
+                isPlannerBusy = false;
+            }
+            portEXIT_CRITICAL(&xferMux);
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
 
-        isVectorMoving = true; // Жестко взводим флаг физического старта движения!
-
-        // Фиксируем эталонную базу
+        // Фиксируем эталонную базу и только после этого разрешаем Core 0
+        // считать генератор остановленным (requestMotionStop).
+        portENTER_CRITICAL(&ringMux);
         plannerStepsX = targetStepsX;
         plannerStepsY = targetStepsY;
         plannerStepsZ = targetStepsZ;
+        isVectorMoving = true; // Жестко взводим флаг физического старта движения!
+        portEXIT_CRITICAL(&ringMux);
+        isMotionGenerating = false;
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -763,11 +876,15 @@ static void IRAM_ATTR emergencyStopFromISR() {
 
     // Best-effort: выбрасываем очередь. Генератор увидит motionStopRequested
     // и прекратит запись; точную очистку выполнит requestMotionStop() в loop().
+    portENTER_CRITICAL_ISR(&ringMux);
     bufferTail = bufferHead;
+    portEXIT_CRITICAL_ISR(&ringMux);
 
     isVectorMoving = false;
     isPlannerBusy = false;
+    portENTER_CRITICAL_ISR(&xferMux);
     nextSeg.hasNewData = false;
+    portEXIT_CRITICAL_ISR(&xferMux);
     timerPhaseHigh = true;
 }
 
@@ -821,7 +938,10 @@ void IRAM_ATTR onTimerInterrupt() {
     // Мы зашли сюда строго раз в 10 микросекунд (эквивалент базовой частоты ЧПУ 100 кГц)
     timerPhaseHigh = false; // Следующий тик таймера гарантированно пойдет в фазу LOW
 
-    // Если в кольцевом буфере есть готовые такты времени от планировщика
+    // Если в кольцевом буфере есть готовые такты времени от планировщика.
+    // ringMux нужен только против Core 0 (homing/stop): motionTask пишет
+    // кольцо на этом же ядре, поэтому отдельная защита от него не требуется.
+    portENTER_CRITICAL_ISR(&ringMux);
     if (bufferTail != bufferHead) {
         StepCmd &cmd = stepRingBuffer[bufferTail];
         
@@ -865,6 +985,7 @@ void IRAM_ATTR onTimerInterrupt() {
         // Если буфер пуст (станок приехал в цель и замер в IDLE)
         isVectorMoving = false; 
     }
+    portEXIT_CRITICAL_ISR(&ringMux);
 }
 
 // ============================================================================
@@ -891,24 +1012,34 @@ static HomingResult homingCheckInputs() {
 // Ставит в кольцевой буфер один шаг нужной оси (пачку тиков ожидания).
 // Возвращает HOMING_OK, если такт записан; иначе — причину остановки.
 static HomingResult enqueueHomingStep(int stepPin, int dirBit) {
-    uint32_t nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
-    while (nextHead == bufferTail) {
-        HomingResult st = homingCheckInputs();
-        if (st != HOMING_OK) return st;
-        vTaskDelay(pdMS_TO_TICKS(1));
-        nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
-    }
-
+    // Core 0 — единственный producer кольца в режиме хоуминга, но ISR читает
+    // кольцо на Core 1. Каждый такт публикуем под ringMux и проверяем место
+    // для него отдельно (пачка из 50 тиков не должна переполнить буфер).
     for (uint16_t t = 0; t < HOMING_DELAY_TICKS; t++) {
-        StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
-        if (t == 0) {
-            if (stepPin == X_STEP_PIN) { cmd.stepX = 1; cmd.dirX = dirBit; }
-            if (stepPin == Y_STEP_PIN) { cmd.stepY = 1; cmd.dirY = dirBit; }
-            if (stepPin == Z_STEP_PIN) { cmd.stepZ = 1; cmd.dirZ = dirBit; }
+        for (;;) {
+            HomingResult st = homingCheckInputs();
+            if (st != HOMING_OK) return st;
+
+            bool hasRoom = false;
+            portENTER_CRITICAL(&ringMux);
+            uint32_t nextHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
+            if (nextHead != bufferTail) {
+                StepCmd cmd = {0, 0, 0, 0, 0, 0, 0};
+                if (t == 0) {
+                    if (stepPin == X_STEP_PIN) { cmd.stepX = 1; cmd.dirX = dirBit; }
+                    if (stepPin == Y_STEP_PIN) { cmd.stepY = 1; cmd.dirY = dirBit; }
+                    if (stepPin == Z_STEP_PIN) { cmd.stepZ = 1; cmd.dirZ = dirBit; }
+                }
+                cmd.valid = 1;
+                stepRingBuffer[bufferHead] = cmd;
+                bufferHead = nextHead;
+                hasRoom = true;
+            }
+            portEXIT_CRITICAL(&ringMux);
+
+            if (hasRoom) break;
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
-        cmd.valid = 1;
-        stepRingBuffer[bufferHead] = cmd;
-        bufferHead = (bufferHead + 1) % STEP_BUFFER_SIZE;
     }
     return HOMING_OK;
 }

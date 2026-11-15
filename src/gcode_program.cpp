@@ -163,9 +163,11 @@ bool processSingleManualCommand(String line) {
     uint8_t type = 255;
     if (line.indexOf("G0") != -1) type = 0;
     if (line.indexOf("G1") != -1) type = 1;
-    if (type == 0 || type == 1) {
+    if ((type == 0 || type == 1) && !isPlannerBusy) {
         // P0-4: первый JOG после аварии/отладки не должен считать дельту
-        // от устаревшей математической базы.
+        // от устаревшей математической базы. Во время движения базу не трогаем:
+        // plannerSteps* уже указывает на конец поставленных кадров, иначе
+        // потеряются ещё не выданные шаги (P1-2, разные ядра).
         syncPlannerToActual();
     }
     

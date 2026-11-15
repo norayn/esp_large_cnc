@@ -12,6 +12,9 @@
 hw_timer_t * cncTimer = NULL;
 String inputBuffer = "";
 
+// Супервизор прикладного уровня, привязан к Core 0 (см. P1-2).
+static void supervisorTask(void *parameter);
+
 void setup() {
     setupAndLoadConfig();
     initMotion();
@@ -57,48 +60,82 @@ void setup() {
         changeState(STATE_ALARM);
     }
 
+    // P1-2: FSM/Wi-Fi/USB/телеметрия уходят на Core 0, чтобы не конкурировать
+    // с генератором шагов (motionTask) и ISR на Core 1.
+    BaseType_t created = xTaskCreatePinnedToCore(
+        supervisorTask,
+        "supervisorTask",
+        8192,
+        NULL,
+        1,
+        NULL,
+        0
+    );
+    if (created != pdPASS) {
+        Serial.println("ERROR: Failed to create supervisorTask on Core 0!");
+    } else {
+        Serial.printf("SYSTEM: setup/timer ISR core=%d, supervisor=Core 0, motionTask=Core 1\n",
+                      xPortGetCoreID());
+    }
+
     Serial.println("SYSTEM: Modular CNC Firmware Fully Loaded.");
 }
 
-void loop() {
-    checkHardwareSecurity();
-    reportStatusToPC();
-    updateWiFiCommunication();
-    updateLaserMapCommunication();
-    updateFeedrateFading();
+// ============================================================================
+// СУПЕРВИЗОР (Core 0): FSM, защита, Wi-Fi, USB, телеметрия, выдача кадров.
+// ============================================================================
+static void supervisorTask(void *parameter) {
+    (void)parameter;
 
-    // ОБРАБОТКА КОМАНД ИЗ USB-UART ПОРТА ПК
-    while (Serial.available() > 0) {
-        char c = Serial.read();
-        if (c == '\n' || c == '\r') {
-            if (inputBuffer.length() > 0) {
-                // Прямой вызов единого диспетчера
-                String response = processIncomingCommand(inputBuffer);
-                
-                if (response.length() > 0) {
-                    Serial.println(response); // Ответ "ok" или "ERROR" улетает в USB
+    Serial.printf("SYSTEM: supervisorTask started on Core %d\n", xPortGetCoreID());
+
+    for (;;) {
+        checkHardwareSecurity();
+        reportStatusToPC();
+        updateWiFiCommunication();
+        updateLaserMapCommunication();
+
+        // ОБРАБОТКА КОМАНД ИЗ USB-UART ПОРТА ПК
+        while (Serial.available() > 0) {
+            char c = Serial.read();
+            if (c == '\n' || c == '\r') {
+                if (inputBuffer.length() > 0) {
+                    // Прямой вызов единого диспетчера
+                    String response = processIncomingCommand(inputBuffer);
+
+                    if (response.length() > 0) {
+                        Serial.println(response); // Ответ "ok" или "ERROR" улетает в USB
+                    }
+                    inputBuffer = "";
                 }
-                inputBuffer = ""; 
+            } else {
+                inputBuffer += c;
             }
-        } else { 
-            inputBuffer += c; 
         }
-    }
 
-    // ====================================================================
-    // АКТУАЛИЗИРОВАННЫЙ АВТОМАТ ОЧЕРЕДИ ЧПУ (Look-Ahead Синхронизация)
-    // ====================================================================
-    // Мы запрашиваем следующий шаг программы из ОЗУ только если:
-    // 1. Станок находится в автоматическом режиме выполнения УП (STATE_RUNNING)
-    // 2. Предыдущий физический вектор ПОЛНОСТЬСТЬЮ выполнен (isVectorMoving == false)
-    // 3. Структура обмена nextSeg свободна и Ядро 1 готово принять новый кадр (!nextSeg.hasNewData)
-    if (currentMachineState == STATE_RUNNING) {
-        if (!isPlannerBusy  && !nextSeg.hasNewData) {
-            executeNextProgramStep(); 
+        // ====================================================================
+        // АКТУАЛИЗИРОВАННЫЙ АВТОМАТ ОЧЕРЕДИ ЧПУ (Look-Ahead Синхронизация)
+        // ====================================================================
+        // Мы запрашиваем следующий шаг программы из ОЗУ только если:
+        // 1. Станок находится в автоматическом режиме выполнения УП (STATE_RUNNING)
+        // 2. Предыдущий физический вектор ПОЛНОСТЬЮ выполнен (isPlannerBusy == false)
+        // 3. Структура обмена nextSeg свободна и Ядро 1 готово принять новый кадр
+        if (currentMachineState == STATE_RUNNING) {
+            if (!isPlannerBusy && !nextSeg.hasNewData) {
+                executeNextProgramStep();
+            }
         }
-    }
-    
-    // Плавное гашение подачи (HOLD / Пауза) отрабатывает на Core 0 на каждом круге loop
-    updateFeedrateFading(); 
 
+        // Плавное гашение подачи (HOLD / Пауза)
+        updateFeedrateFading();
+
+        // 1 мс достаточно для USB/Wi-Fi/телеметрии и не грузит Core 0 впустую.
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+// Arduino loopTask остаётся на Core 1 только для setup() и привязки ISR
+// таймера к этому ядру. Вся прикладная работа — в supervisorTask (Core 0).
+void loop() {
+    vTaskDelay(pdMS_TO_TICKS(10));
 }
