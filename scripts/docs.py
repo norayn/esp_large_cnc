@@ -5,7 +5,12 @@
 (`CONFIG_FIELDS`), для GPIO — `src/pinout.h`. Документация не хранит их копию:
 таблица в `docs/config.md` генерируется, числа в `docs/hardware.md` сверяются.
 
+`check` также следит за структурой: статус задачи живёт только в индексе
+`TODO.md`, тело — в `docs/tasks/`; закрытый пункт не должен остаться в индексе.
+Используется в CI (`.github/workflows/docs.yml`).
+
     python3 scripts/docs.py check   # проверить (код возврата 1 при расхождении)
+    python3 scripts/docs.py links   # проверить относительные ссылки и анкоры
     python3 scripts/docs.py gen     # перегенерировать таблицу в docs/config.md
 
 Требуется только стандартная библиотека Python 3.8+.
@@ -21,6 +26,10 @@ PINOUT_H = ROOT / "src" / "pinout.h"
 CONFIG_MD = ROOT / "docs" / "config.md"
 HARDWARE_MD = ROOT / "docs" / "hardware.md"
 INDEX_MD = ROOT / "docs" / "INDEX.md"
+TODO_MD = ROOT / "TODO.md"
+TASKS_DIR = ROOT / "docs" / "tasks"
+OPEN_TASK_FILES = ("p1.md", "p2.md", "p3.md")
+DONE_TASK_FILE = "done.md"
 
 BEGIN = "<!-- BEGIN GENERATED: config-fields -->"
 END = "<!-- END GENERATED: config-fields -->"
@@ -80,9 +89,12 @@ ROW_RE = re.compile(r"^\|\s*`(?P<name>[A-Z0-9_]+)`\s*\|\s*(?P<num>-?\d+)\s*\|")
 SIZE_LIMITS = {
     "README.md": 6 * 1024,
     "AGENTS.md": 8 * 1024,
-    "TODO.md": 44 * 1024,
+    "TODO.md": 10 * 1024,
 }
 DOCS_DIR_LIMIT = 12 * 1024
+DONE_TASKS_LIMIT = 20 * 1024
+TASK_ID_RE = re.compile(r"\*\*(?P<id>P\d-\d+)\b")
+INDEX_ROW_RE = re.compile(r"^\|\s*(?P<id>P\d-\d+)\s*\|", re.M)
 
 
 def parse_config_fields():
@@ -147,6 +159,80 @@ def cmd_gen():
     print(f"обновлено: {CONFIG_MD.relative_to(ROOT)} ({len(fields)} полей)")
 
 
+def task_errors():
+    """Статус задачи живёт только в индексе TODO.md, тело — в docs/tasks/."""
+    errors = []
+    index_ids = INDEX_ROW_RE.findall(TODO_MD.read_text(encoding="utf-8"))
+
+    defined = {}
+    for name in OPEN_TASK_FILES + (DONE_TASK_FILE,):
+        path = TASKS_DIR / name
+        if not path.exists():
+            errors.append(f"docs/tasks/{name}: файл отсутствует")
+            continue
+        if len(path.read_bytes()) > (DONE_TASKS_LIMIT if name == DONE_TASK_FILE else DOCS_DIR_LIMIT):
+            errors.append(f"docs/tasks/{name}: файл слишком большой — разделите по темам")
+        for tid in TASK_ID_RE.findall(path.read_text(encoding="utf-8")):
+            if tid in defined:
+                errors.append(f"{tid}: описан дважды ({defined[tid]} и {name})")
+            defined[tid] = name
+
+    for tid in index_ids:
+        if tid not in defined:
+            errors.append(f"TODO.md: {tid} есть в индексе, но его тела нет в docs/tasks/")
+        elif defined[tid] == DONE_TASK_FILE:
+            errors.append(f"TODO.md: {tid} закрыт (лежит в done.md), но всё ещё в индексе открытых")
+    for tid, name in sorted(defined.items()):
+        if name != DONE_TASK_FILE and tid not in index_ids:
+            errors.append(f"docs/tasks/{name}: {tid} нет в индексе TODO.md — добавьте строку или перенесите в done.md")
+
+    open_count = len([t for t in defined if defined[t] != DONE_TASK_FILE])
+    if not errors and open_count != len(index_ids):
+        errors.append(f"TODO.md: строк в индексе {len(index_ids)}, открытых пунктов {open_count}")
+    return errors
+
+
+def _slug(heading):
+    s = heading.strip().lower()
+    s = s.replace("`", "")
+    s = re.sub(r"[^\w\s\-а-яё]", "", s)
+    return s.replace(" ", "-")
+
+
+def cmd_links():
+    """Проверяет относительные ссылки и анкоры в markdown."""
+    files = [ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "TODO.md"]
+    files += sorted(INDEX_MD.parent.glob("*.md")) + sorted(TASKS_DIR.glob("*.md"))
+    anchors = {}
+    for f in files:
+        anchors[f.resolve()] = {
+            _slug(m.group(2))
+            for m in re.finditer(r"^(#{1,6})\s+(.*)$", f.read_text(encoding="utf-8"), re.M)
+        }
+
+    errors = []
+    for f in files:
+        rel = f.relative_to(ROOT)
+        for m in re.finditer(r"\[[^\]]*\]\(([^)]+)\)", f.read_text(encoding="utf-8")):
+            url = m.group(1)
+            if url.startswith(("http://", "https://", "mailto:")):
+                continue
+            path, _, frag = url.partition("#")
+            target = (f.parent / path).resolve() if path else f.resolve()
+            if not target.exists():
+                errors.append(f"{rel}: битая ссылка {url}")
+            elif frag and frag not in anchors.get(target, set()):
+                errors.append(f"{rel}: нет анкора #{frag} в {target.name}")
+
+    if errors:
+        print("Битые ссылки:\n")
+        for e in errors:
+            print(f"  • {e}")
+        return 1
+    print(f"docs.py: OK — ссылки и анкоры целы ({len(files)} файлов)")
+    return 0
+
+
 def cmd_check():
     errors = []
     fields = parse_config_fields()
@@ -195,6 +281,8 @@ def cmd_check():
         if p.exists() and p.stat().st_size > limit:
             errors.append(f"{rel}: {p.stat().st_size} байт > лимита {limit} — разнесите по docs/")
 
+    errors.extend(task_errors())
+
     for p in sorted(INDEX_MD.parent.glob("*.md")):
         size = p.stat().st_size
         if size > DOCS_DIR_LIMIT:
@@ -218,6 +306,8 @@ def main():
         return 0
     if cmd == "check":
         return cmd_check()
+    if cmd == "links":
+        return cmd_links()
     print(__doc__)
     return 2
 

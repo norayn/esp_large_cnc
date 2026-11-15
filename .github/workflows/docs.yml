@@ -1,0 +1,21 @@
+name: docs
+
+# Дешёвая проверка вместо дорогой: расхождение доков с кодом иначе выясняется
+# при чтении документации агентом или человеком — то есть на порядок позже и дороже.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Проверить доки и структуру задач
+        run: python3 scripts/docs.py check
+      - name: Проверить, что внутренние ссылки и анкоры живут
+        run: python3 scripts/docs.py links
