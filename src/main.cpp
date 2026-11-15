@@ -7,6 +7,7 @@
 #include "state_manager.h"
 #include "wifi_manager.h"
 #include "indicator_probe.h"
+#include "safety_inputs.h"
 
 hw_timer_t * cncTimer = NULL;
 String inputBuffer = "";
@@ -26,10 +27,8 @@ void setup() {
     pinMode(MOTORS_ENABLE, OUTPUT);
     pinMode(RELE_SPINDLE, OUTPUT); pinMode(RELE_COOLANT, OUTPUT);
 
-    // Входы защиты
-    pinMode(ESTOP_PIN, INPUT_PULLUP);
-    pinMode(MOTORS_ALARM, INPUT_PULLUP);
-    pinMode(ENDSTOPS_PIN, INPUT_PULLUP);
+    // Входы защиты: GPIO 34/35/39 — input-only, INPUT_PULLUP не действует.
+    initSafetyInputs();
 
     Serial.begin(115200);
     Serial.setTxBufferSize(2560); 
@@ -46,7 +45,18 @@ void setup() {
     // Запуск фонового потока планировщика на Ядре 1
     startMotionTask(); 
 
-    changeState(STATE_IDLE);
+    // P0-9: самотест NC-цепи до перехода в готовность. При обрыве/нажатии
+    // любого входа станок сразу уходит в ALARM, а не рапортует IDLE.
+    String safetyReason;
+    bool safetyOk = runSafetySelfTest(&safetyReason);
+    if (safetyReason.length() > 0) sendToWiFiClient(safetyReason);
+
+    if (safetyOk) {
+        changeState(STATE_IDLE);
+    } else {
+        changeState(STATE_ALARM);
+    }
+
     Serial.println("SYSTEM: Modular CNC Firmware Fully Loaded.");
 }
 

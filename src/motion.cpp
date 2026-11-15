@@ -3,6 +3,7 @@
 #include "pinout.h"
 #include "gcode_program.h"
 #include "state_manager.h"
+#include "safety_inputs.h"
 #include <Arduino.h>
 
 // Аппаратный таймер создаётся в main.cpp; нужен для остановки/запуска выдачи шагов.
@@ -783,10 +784,10 @@ void IRAM_ATTR onTimerInterrupt() {
 
     // Проверяем критические аварии, которые должны сработать ВСЕГДА,
     // в том числе когда выдача шагов остановлена (IDLE/STOP/ALARM).
-    bool criticalAlarm = (digitalRead(ESTOP_PIN) == HIGH || digitalRead(MOTORS_ALARM) == HIGH);
+    bool criticalAlarm = (safetyEstopActive() || safetyMotorAlarmActive());
     
     // Линию концевиков подмешиваем к аварии ТОЛЬКО если сейчас не идет процедура хоуминга
-    if (!isHomingActive && digitalRead(ENDSTOPS_PIN) == HIGH) {
+    if (!isHomingActive && safetyEndstopsActive()) {
         criticalAlarm = true;
     }
 
@@ -879,8 +880,8 @@ static const unsigned long HOMING_SETTLE_MS = 100;
 
 // Проверка аварийных входов и запросов остановки во время хоуминга.
 static HomingResult homingCheckInputs() {
-    if (alarmRequested || digitalRead(ESTOP_PIN) == HIGH ||
-        digitalRead(MOTORS_ALARM) == HIGH || currentMachineState == STATE_ALARM) {
+    if (alarmRequested || safetyEstopActive() ||
+        safetyMotorAlarmActive() || currentMachineState == STATE_ALARM) {
         return HOMING_FAILED;
     }
     if (motionStopRequested) return HOMING_ABORTED;

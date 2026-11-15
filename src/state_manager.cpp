@@ -3,6 +3,7 @@
 #include "motion.h"
 #include "config.h"
 #include "wifi_manager.h"
+#include "safety_inputs.h"
 #include <Preferences.h>
 
 extern Preferences preferences; 
@@ -65,7 +66,7 @@ bool changeState(MachineState newState) {
             // Любой переход в IDLE — это остановка: очередь шагов сбрасывается,
             // остаток кадра не доигрывается и не «ползёт» на 0,1 мм/с.
             requestMotionStop();
-            if (digitalRead(ESTOP_PIN) != HIGH && digitalRead(MOTORS_ALARM) != HIGH) {
+            if (!safetyEstopActive() && !safetyMotorAlarmActive()) {
                 digitalWrite(MOTORS_ENABLE, LOW);
             }
             break;
@@ -90,7 +91,7 @@ void checkHardwareSecurity() {
     }
 
     // Аппаратная кнопка аварийной остановки (E-STOP) должна работать ВСЕГДА
-    if (digitalRead(ESTOP_PIN) == HIGH) { // Предположим, HIGH = нажата
+    if (safetyEstopActive()) { // HIGH = нажата / цепь разорвана
         if (currentMachineState != STATE_ALARM) {
             changeState(STATE_ALARM);
             Serial.println("CRITICAL: E-STOP Button Pressed!");
@@ -98,7 +99,7 @@ void checkHardwareSecurity() {
         return;
     }
 
-    if (digitalRead(MOTORS_ALARM) == HIGH) {
+    if (safetyMotorAlarmActive()) {
         if (currentMachineState != STATE_ALARM) {
             changeState(STATE_ALARM);
             Serial.println("CRITICAL: Motor alarm!");
@@ -113,7 +114,7 @@ void checkHardwareSecurity() {
     }
 
     // Стандартная рантайм-защита (работает в IDLE, RUNNING, JOGGING и т.д.)
-    if (digitalRead(ENDSTOPS_PIN) == HIGH) {
+    if (safetyEndstopsActive()) {
         if (currentMachineState != STATE_ALARM) {
             changeState(STATE_ALARM);
             Serial.println("CRITICAL: Limit switch triggered during runtime operation!");
