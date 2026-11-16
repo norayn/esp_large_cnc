@@ -29,7 +29,7 @@ INDEX_MD = ROOT / "docs" / "INDEX.md"
 TODO_MD = ROOT / "TODO.md"
 TASKS_DIR = ROOT / "docs" / "tasks"
 OPEN_TASK_FILES = ("p1.md", "p2.md", "p3.md")
-DONE_TASK_FILE = "done.md"
+DONE_TASK_GLOB = "done*.md"
 
 BEGIN = "<!-- BEGIN GENERATED: config-fields -->"
 END = "<!-- END GENERATED: config-fields -->"
@@ -164,13 +164,19 @@ def task_errors():
     errors = []
     index_ids = INDEX_ROW_RE.findall(TODO_MD.read_text(encoding="utf-8"))
 
+    # Архив — все done*.md: один файл перерос лимит, поэтому P0 и P1 разведены.
+    done_files = sorted(p.name for p in TASKS_DIR.glob(DONE_TASK_GLOB))
+    if not done_files:
+        errors.append(f"docs/tasks/: нет ни одного архива {DONE_TASK_GLOB}")
+
     defined = {}
-    for name in OPEN_TASK_FILES + (DONE_TASK_FILE,):
+    for name in OPEN_TASK_FILES + tuple(done_files):
         path = TASKS_DIR / name
         if not path.exists():
             errors.append(f"docs/tasks/{name}: файл отсутствует")
             continue
-        if len(path.read_bytes()) > (DONE_TASKS_LIMIT if name == DONE_TASK_FILE else DOCS_DIR_LIMIT):
+        limit = DONE_TASKS_LIMIT if name in done_files else DOCS_DIR_LIMIT
+        if len(path.read_bytes()) > limit:
             errors.append(f"docs/tasks/{name}: файл слишком большой — разделите по темам")
         for tid in TASK_ID_RE.findall(path.read_text(encoding="utf-8")):
             if tid in defined:
@@ -180,13 +186,13 @@ def task_errors():
     for tid in index_ids:
         if tid not in defined:
             errors.append(f"TODO.md: {tid} есть в индексе, но его тела нет в docs/tasks/")
-        elif defined[tid] == DONE_TASK_FILE:
-            errors.append(f"TODO.md: {tid} закрыт (лежит в done.md), но всё ещё в индексе открытых")
+        elif defined[tid] in done_files:
+            errors.append(f"TODO.md: {tid} закрыт (лежит в docs/tasks/{defined[tid]}), но всё ещё в индексе открытых")
     for tid, name in sorted(defined.items()):
-        if name != DONE_TASK_FILE and tid not in index_ids:
-            errors.append(f"docs/tasks/{name}: {tid} нет в индексе TODO.md — добавьте строку или перенесите в done.md")
+        if name not in done_files and tid not in index_ids:
+            errors.append(f"docs/tasks/{name}: {tid} нет в индексе TODO.md — добавьте строку или перенесите в архив {DONE_TASK_GLOB}")
 
-    open_count = len([t for t in defined if defined[t] != DONE_TASK_FILE])
+    open_count = len([t for t in defined if defined[t] not in done_files])
     if not errors and open_count != len(index_ids):
         errors.append(f"TODO.md: строк в индексе {len(index_ids)}, открытых пунктов {open_count}")
     return errors

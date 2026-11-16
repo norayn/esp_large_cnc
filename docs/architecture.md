@@ -8,11 +8,11 @@
 
 - **Core 0 — супервизор:** `supervisorTask` (Arduino `loop()` пустой), Wi-Fi TCP, USB-UART, FSM, приём и буферизация УП, телеметрия.
 - **Core 1 — движение:** высокоприоритетная задача `motionTask` (DDA/Брезенхем) и аппаратный таймер шагов.
-- Обмен кадрами — через структуру `nextSeg` и кольцевой буфер тактов `stepRingBuffer`.
+- Обмен кадрами — через очередь кадров `frameQueue` (под `xferMux`) и кольцевой буфер тактов `stepRingBuffer`.
 
 ## 1.2 ФАКТ: фактическое распределение
 
-- **Core 0 — `supervisorTask`** (`xTaskCreatePinnedToCore`, приоритет 1, стек 8192): `checkHardwareSecurity()`, FSM-команды из USB/Wi-Fi, телеметрия, приём карт, выдача следующего кадра УП, `updateFeedrateFading()`.
+- **Core 0 — `supervisorTask`** (`xTaskCreatePinnedToCore`, приоритет 1, стек 8192): `checkHardwareSecurity()`, FSM-команды из USB/Wi-Fi, телеметрия, приём карт, выдача следующего кадра УП, `updateFeedrateFading()`, `updateLaserMapCommunication()`, `updateScanTask()` (один шаг скана за круг, [geometry.md §5.4](geometry.md#54-комплексное-сканирование-геометрии)).
 - **Core 1 — `motionTask`** (`xTaskCreatePinnedToCore`, приоритет 24, стек 8192): DDA/Брезенхем, заполнение `stepRingBuffer`.
 - **Core 1 — таймерный ISR**: `timerAttachInterrupt()` вызывается из `setup()`, а `setup()`/`loopTask` остаются на Core 1 (`ARDUINO_RUNNING_CORE = 1`). Поэтому ISR не переезжает на Core 0 вместе с супервизором. Если перенести `setup` на Core 0, ISR тоже уедет туда — это важно при будущих изменениях.
 - Arduino `loop()` оставлен пустым (`vTaskDelay`): вся прикладная работа в `supervisorTask`, чтобы `loopTask` не конкурировал с генератором.

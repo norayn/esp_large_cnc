@@ -6,7 +6,8 @@
 | Файл | О чём | Читать, когда трогаете |
 |---|---|---|
 | [architecture.md](architecture.md) | ядра, задачи, мьютексы, сетка таймера | `supervisorTask`/`motionTask`, приоритеты, `CNC_TIMER_TICK_US`, межъядерный обмен |
-| [fsm-safety.md](fsm-safety.md) | FSM, аварийные входы, хоуминг, soft limits | `changeState()`, ESTOP/концевики, `requestMotionStop()`, `validateMachineTarget()` |
+| [fsm-safety.md](fsm-safety.md) | FSM, аварийные входы, soft limits | `changeState()`, ESTOP/концевики, `requestMotionStop()`, `validateMachineTarget()` |
+| [homing.md](homing.md) | хоуминг Z → X → Y, общая NC-цепь концевиков | `runFullHoming()`, `homeAxis()`, процедура `HOME` |
 | [motion.md](motion.md) | структуры, планировщик кадра, ISR, HOLD/OVERRIDE | шаги, кольцевой буфер, DDA, скорости, пауза |
 | [geometry.md](geometry.md) | механика, WCS, наклон A/B, карта провиса, щуп | координаты, компенсации, `SCAN_GEOMETRY`, `START_CALIBRATION` |
 | [protocol.md](protocol.md) | TCP 8888, команды, `B:`, телеметрия, единицы | формат команд и строк, ответы |
@@ -15,7 +16,8 @@
 | [config.md](config.md) | `CONFIG_FIELDS`, NVS, `GET/SET_CONFIG` | параметры и их сохранение |
 | [../TODO.md](../TODO.md) | индекс открытых пунктов и критерии приёмки | выбираете задачу |
 | [tasks/p1.md](tasks/p1.md), [tasks/p2.md](tasks/p2.md), [tasks/p3.md](tasks/p3.md) | тела открытых задач: файлы, симптом, действие, критерий | берёте конкретный ID |
-| [tasks/done.md](tasks/done.md) | закрытые P0 и P1 — история решений | нужно понять, почему сделано именно так |
+| [tasks/done.md](tasks/done.md) | закрытые P0 — история решений | нужно понять, почему сделано именно так |
+| [tasks/done-p1.md](tasks/done-p1.md) | закрытые P1 — история решений | нужно понять, почему сделано именно так |
 | [../AGENTS.md](../AGENTS.md) | навигатор: сборка, карта кода, правила | начало работы в репозитории |
 
 ## Соглашения

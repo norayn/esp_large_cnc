@@ -59,12 +59,14 @@
 | `SET_ALIGN_A` / `SET_ALIGN_B` | запомнить точки A/B |
 | `ACTIVATE_ALIGN` / `DEACTIVATE_ALIGN` | включить/выключить наклон |
 | `GCODE_UPLOAD_START` | очистить буфер и перейти в приём УП |
-| `START_CALIBRATION` | прогон лазерной карты (сейчас без движения) |
+| `START_CALIBRATION` | калибровка лазерной карты по `laserMapSize` / `laserGridStep` |
 | `EXPORT_MAP` | выгрузка карты CSV в сокет |
 | `MAP_LOAD_START` | переход в режим импорта карты |
 | `SCAN_GEOMETRY:<START>;<END>;<STEP>;<SPEED>` | скан геометрии, `SPEED` — мм/мин |
 
 > Команды, которые могут начать движение (`START_PROGRAM`, `START_FROM_LINE`, `JOG`, `SCAN_GEOMETRY`, `HOME`, `START_CALIBRATION`), сначала вызывают `changeState()`. Если переход запрещён (`ALARM` или `!isHomed`), в сокет уходит `ERROR: ...`, и движение не начинается. Исключение — `JOG` при `allowJogBeforeHoming = true` (по умолчанию).
+
+`SCAN_GEOMETRY` и `START_CALIBRATION` только запускают процедуру и сразу отвечают: дальше скан идёт по шагам из `supervisorTask`, поэтому телеметрия и `STOP`/`ESTOP` обрабатываются всё время прохода. Ход процедуры виден по строкам `=== START … ===` / `DATA: …` / `=== END … ===`, прерывание — `=== SCAN ABORTED ===` (форматы — [geometry.md §5.4](geometry.md#54-комплексное-сканирование-геометрии)).
 
 ## 6.5 Загрузка УП
 
@@ -131,6 +133,8 @@ MAP_LOAD:IDX=<i>;Y=<offset>;Z=<offset>
 - `ERROR: Machine is LOCKED. Run HOMING first.` — нарушена блокировка хоуминга.
 - `STATUS: …` — текстовые статусы (многие команды выдают `STATUS` и затем `ok`).
 - `ERROR: Add to RAM buffer failed`, `ERROR: Look-Ahead binary packet corrupt! …`, `ERROR: Frame …` (битая физика кадра).
+- Скан и калибровка: `ERROR: SCAN_GEOMETRY requires finite START/END, STEP>0, END>START and SPEED>0.`, `ERROR: SCAN_GEOMETRY SPEED must be 1..20000 mm/min.`, `ERROR: SCAN_GEOMETRY needs more than 2000 points. Increase STEP.`, `ERROR: laserMapSize must be 1..250.`, `ERROR: laserGridStep must be > 0 mm.`, `ERROR: A scan is already running.` Отказ приходит до перехода в `STATE_CALIBRATION`, станок остаётся в `IDLE`.
+- `ERROR: Endstop chain is open before homing. …` — общая NC-цепь концевиков разомкнута, `HOME` не начат ([homing.md §3.4](homing.md#34-хоуминг)).
 
 ---
 

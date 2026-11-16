@@ -53,7 +53,7 @@
 | [docs/hardware.md](docs/hardware.md) | §8, §9 — pinout, сборка, прошивка |
 | [docs/config.md](docs/config.md) | §10 — `CONFIG_FIELDS`, NVS, `GET/SET_CONFIG` |
 | [TODO.md](TODO.md) | §11 — индекс открытых пунктов P0…P3 (тела задач — в `docs/tasks/`) |
-| [docs/tasks/p1.md](docs/tasks/p1.md) | детали открытых задач; рядом `p2.md`, `p3.md`, архив `done.md` |
+| [docs/tasks/p1.md](docs/tasks/p1.md) | детали открытых задач; рядом `p2.md`, `p3.md`, архив `done*.md` |
 | [AGENTS.md](AGENTS.md) | сборка, карта кода, инварианты, правила правок |
 
 ## Как поддерживать эту документацию
