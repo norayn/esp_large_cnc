@@ -37,7 +37,7 @@
 | `STOP` | мягкая остановка: очистка очереди, `IDLE`, `isHomed` сохраняется; в `ALARM` остаётся `ALARM` |
 | `RESET_ALARM` | `isHomed = false`, остановка движения, переход в `IDLE` (машина снова LOCKED) |
 | `HOLD` или `!` | пауза из `RUNNING`/`JOGGING` |
-| `RESUME` или `~` | продолжение из `HOLD` без потери шагов |
+| `RESUME` или `~` | продолжение из `HOLD` без потери шагов, в то состояние, откуда пришли |
 | `OVERRIDE=<0.1…2.0>` | плавный множитель подачи |
 
 > `RESET_ALARM`, `STOP` и переход в `ALARM` вызывают `requestMotionStop()`: выдача шагов прекращается сразу, буфер очищается в критической секции. Таймер остаётся работоспособным, поэтому `ESTOP`/`MOTORS_ALARM` по-прежнему обрабатываются в ISR без участия `supervisorTask`.
@@ -85,6 +85,12 @@ B:<TYPE>;<LINE>;<X>;<Y>;<Z>;<F>;<V_START>;<V_END>
 
 - `GCODE_UPLOAD_END` → `STATUS: Upload complete. Loaded N commands.` + `ok`, возврат в `IDLE`.
 - При переполнении (2000 кадров) — `ERROR: Add to RAM buffer failed`.
+- Физика кадра проверяется при постановке в очередь (§4.7 в [motion.md](motion.md)): `F <= 0`,
+  `accel <= 0` и `NaN/Inf` в любом поле дают `ERROR: Frame feedrate must be > 0 mm/s.` /
+  `ERROR: Frame acceleration must be > 0 mm/s^2.` / `ERROR: Frame physics is not finite (NaN/Inf).`,
+  станок при этом не двигается, УП останавливается (`IDLE`). `v_start`/`v_end` больше
+  подачи кадра более чем на 1 % — тоже `ERROR: Frame …`; в пределах допуска скорости
+  зажимаются в коридор.
 
 ## 6.6 Импорт карты лазера
 
@@ -124,7 +130,7 @@ MAP_LOAD:IDX=<i>;Y=<offset>;Z=<offset>
 - `ERROR: Unknown or blocked command: …` — команда не разрешена в текущем состоянии.
 - `ERROR: Machine is LOCKED. Run HOMING first.` — нарушена блокировка хоуминга.
 - `STATUS: …` — текстовые статусы (многие команды выдают `STATUS` и затем `ok`).
-- `ERROR: Add to RAM buffer failed`, `ERROR: Look-Ahead binary packet corrupt! …`.
+- `ERROR: Add to RAM buffer failed`, `ERROR: Look-Ahead binary packet corrupt! …`, `ERROR: Frame …` (битая физика кадра).
 
 ---
 

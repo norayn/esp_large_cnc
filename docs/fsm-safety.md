@@ -26,7 +26,7 @@
 - `RESET_ALARM` **сбрасывает** `isHomed = false`, то есть после сброса аварии требуется повторный хоуминг.
 - `ESTOP` переводит в `ALARM`, обесточивает моторы и выключает реле.
 - `HOME`/`$H` доступны только из `IDLE`.
-- `HOLD`/`!` — только из `RUNNING`/`JOGGING`; `RESUME`/`~` — только из `HOLD`.
+- `HOLD`/`!` — только из `RUNNING`/`JOGGING`; `RESUME`/`~` — только из `HOLD` и возвращает в то состояние, из которого пришли (пауза во время JOG не запускает УП).
 
 `HOME`, `JOG`, `START_PROGRAM`, `START_FROM_LINE`, `START_CALIBRATION` и `SCAN_GEOMETRY` проверяют результат `changeState()` и при отказе не двигают станок. `startProgramExecution()` дополнительно требует `isHomed`, `totalLoadedCommands > 0` и отсутствие `ALARM`.
 
