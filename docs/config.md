@@ -52,7 +52,7 @@
 | `wcsOffsetY` | `wcsY` | float | 0.0 | смещение G54 по Y |
 | `wcsOffsetZ` | `wcsZ` | float | 0.0 | смещение G54 по Z |
 | `lastExecutedLine` | `lastLine` | int | 0 | последний кадр (в NVS пишется при ALARM) |
-| `statusInterval` | `statInt` | int | 1000 | период телеметрии, мс |
+| `statusInterval` | `statInt` | int | 1000 | период телеметрии, мс (минимум 50) |
 | `sendOnlyOnChange` | `sendChg` | bool | false | слать телеметрию только при изменении |
 | `homingDirX` | `homDirX` | int | -1 | направление хоуминга X |
 | `homingDirY` | `homDirY` | int | -1 | направление хоуминга Y |

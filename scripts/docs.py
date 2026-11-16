@@ -69,7 +69,7 @@ DESCRIPTIONS = {
     "wcsOffsetY": "смещение G54 по Y",
     "wcsOffsetZ": "смещение G54 по Z",
     "lastExecutedLine": "последний кадр (в NVS пишется при ALARM)",
-    "statusInterval": "период телеметрии, мс",
+    "statusInterval": "период телеметрии, мс (минимум 50)",
     "sendOnlyOnChange": "слать телеметрию только при изменении",
     "homingDirX": "направление хоуминга X",
     "homingDirY": "направление хоуминга Y",
