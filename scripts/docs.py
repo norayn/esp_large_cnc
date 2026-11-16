@@ -28,7 +28,7 @@ HARDWARE_MD = ROOT / "docs" / "hardware.md"
 INDEX_MD = ROOT / "docs" / "INDEX.md"
 TODO_MD = ROOT / "TODO.md"
 TASKS_DIR = ROOT / "docs" / "tasks"
-OPEN_TASK_FILES = ("p1.md", "p2.md", "p3.md")
+OPEN_TASK_FILES = ("p2.md", "p3.md")
 DONE_TASK_GLOB = "done*.md"
 
 BEGIN = "<!-- BEGIN GENERATED: config-fields -->"
