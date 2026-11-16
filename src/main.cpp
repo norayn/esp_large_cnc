@@ -57,7 +57,7 @@ void setup() {
     // любого входа станок сразу уходит в ALARM, а не рапортует IDLE.
     String safetyReason;
     bool safetyOk = runSafetySelfTest(&safetyReason);
-    if (safetyReason.length() > 0) sendToWiFiClient(safetyReason);
+    if (safetyReason.length() > 0) sendToBothClients(safetyReason);
 
     if (safetyOk) {
         changeState(STATE_IDLE);

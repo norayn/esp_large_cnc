@@ -27,12 +27,20 @@ void initWiFiManager() {
     wifiInputBuffer = "";
 }
 
+// Только TCP: строка уходит клиенту GUI. USB здесь не дублируется — иначе
+// каждая строка, которую владелец вывода уже напечатал в Serial, появлялась бы
+// в мониторе порта дважды (P2-6).
 void sendToWiFiClient(String message) {
     if (isWiFiClientConnected && tcpClient.connected()) {
         tcpClient.println(message);
     }
+}
 
-    Serial.println(message); 
+// Сообщение, которое должно дойти до обоих каналов: ровно одна строка в TCP и
+// одна в USB. Через него идут телеметрия и ответы на команды.
+void sendToBothClients(String message) {
+    Serial.println(message);
+    sendToWiFiClient(message);
 }
 
 String processIncomingCommand(String cmd) {
@@ -165,7 +173,7 @@ static bool handleIdleCommands(const String& cmd) {
         // блокировку и синхронизируем математику планировщика с фактом.
         syncPlannerToActual();
         isHomed = true;
-        sendToWiFiClient("STATUS: DEBUG HOMING SUCCESSFUL. Machine unlocked.");
+        sendToBothClients("STATUS: DEBUG HOMING SUCCESSFUL. Machine unlocked.");
         return true;
     }
     // Обнуление координат детали (WCS G54)
@@ -173,13 +181,13 @@ static bool handleIdleCommands(const String& cmd) {
         String ax = cmd.substring(9);
         if (ax == "ALL") setWcsZero('A');
         else if (ax.length() > 0) setWcsZero(ax[0]);
-        sendToWiFiClient("STATUS: WCS Zero Updated.");
+        sendToBothClients("STATUS: WCS Zero Updated.");
         return true;
     }
     if (cmd == "GET_CONFIG" || cmd.startsWith("SET_CONFIG:")) {
         String response = handleConfigCommand(cmd);
         if (response.length() > 0) {
-            sendToWiFiClient(response);
+            sendToBothClients(response);
             return true;
         }
         return false;
@@ -214,7 +222,7 @@ static bool handleIdleCommands(const String& cmd) {
         // Жестко переключаем автомат в режим приема G-кода!
         if (!changeState(STATE_GCODE_UPLOAD)) return true;
         clearGCodeBuffer();
-        sendToWiFiClient("STATUS: Ready");
+        sendToBothClients("STATUS: Ready");
         return true;
     }
     if (cmd == "START_PROGRAM") {
@@ -230,7 +238,7 @@ static bool handleIdleCommands(const String& cmd) {
         if (lineFound) { startProgramExecution(); }
         return true;
     }
-    if (cmd == "GET_LAST_ABORTED_LINE") { sendToWiFiClient("LAST_LINE:" + String(cfg.lastExecutedLine)); return true; }
+    if (cmd == "GET_LAST_ABORTED_LINE") { sendToBothClients("LAST_LINE:" + String(cfg.lastExecutedLine)); return true; }
     if (cmd.startsWith("JOG:")) {
         if (!changeState(STATE_JOGGING)) return true; // отказ: станок не двигаем
         if (!processSingleManualCommand(cmd.substring(4))) {

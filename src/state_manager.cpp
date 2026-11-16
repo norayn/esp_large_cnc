@@ -146,8 +146,16 @@ void checkHardwareSecurity() {
 
 
 void reportStatusToPC() {
-    // 1. ПРОВЕРКА ТАЙМЕРА: Заходим внутрь строго с шагом statusInterval (в обоих режимах)
-    if (millis() - lastReportTime < (unsigned long)cfg.statusInterval) {
+    // 1. ПРОВЕРКА ТАЙМЕРА: Заходим внутрь строго с шагом statusInterval (в обоих режимах).
+    // SET_CONFIG пока не валидирует поля (P2-5), поэтому 0 или отрицательное
+    // значение слало бы телеметрию каждый круг supervisorTask и забило бы
+    // сокет и USB. Нижняя граница — 50 мс (20 строк/с).
+    static const long MIN_STATUS_INTERVAL_MS = 50;
+    const long configured = (long)cfg.statusInterval;
+    const unsigned long interval = (configured < MIN_STATUS_INTERVAL_MS)
+                                       ? (unsigned long)MIN_STATUS_INTERVAL_MS
+                                       : (unsigned long)configured;
+    if (millis() - lastReportTime < interval) {
         return; 
     }
     lastReportTime = millis(); // Сбрасываем таймер на следующий шаг
@@ -178,10 +186,9 @@ void reportStatusToPC() {
         needToSend = true;
     }
 
-    // 4. ФИЗИЧЕСКАЯ ОТПРАВКА В ПОРТЫ
+    // 4. ФИЗИЧЕСКАЯ ОТПРАВКА В ПОРТЫ (ровно одна строка в TCP и одна в USB)
     if (needToSend) {
-        Serial.println(currentStatusStr);
-        sendToWiFiClient(currentStatusStr);
+        sendToBothClients(currentStatusStr);
         lastSentStatusStr = currentStatusStr; // Запоминаем последний отправленный пакет
     }
 }
