@@ -127,7 +127,10 @@ static void supervisorTask(void *parameter) {
         //
         // В покадровом режиме ждём полного слива: иначе один триггер
         // NEXT_BLOCK поставил бы в очередь сразу FRAME_QUEUE_SIZE кадров.
-        if (currentMachineState == STATE_RUNNING) {
+        // В HOLD конвейер тоже наполняется: пауза замораживает только генератор
+        // на Core 1, а очередь кадров успевает заполниться, поэтому RESUME не
+        // начинается с пустого кольца (P1-5).
+        if (currentMachineState == STATE_RUNNING || currentMachineState == STATE_HOLD) {
             while (canQueueFrame() && executeNextProgramStep()) {
                 if (isSingleBlockMode && isPlannerBusy) break;
             }

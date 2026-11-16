@@ -80,6 +80,28 @@ bool changeState(MachineState newState) {
     return true;
 }
 
+// Откуда пришли в HOLD. RESUME возвращает именно туда: пауза во время JOG
+// не должна превращаться в запуск УП.
+static MachineState holdReturnState = STATE_RUNNING;
+
+bool enterHold() {
+    if (currentMachineState != STATE_RUNNING && currentMachineState != STATE_JOGGING) {
+        return false;
+    }
+    holdReturnState = currentMachineState;
+    return changeState(STATE_HOLD);
+}
+
+bool resumeFromHold() {
+    if (currentMachineState != STATE_HOLD) return false;
+    if (changeState(holdReturnState)) return true;
+
+    // Вернуться в JOGGING можно не всегда (хоуминг/ALARM): тогда в IDLE,
+    // чтобы станок не остался в HOLD без возможности выйти.
+    changeState(STATE_IDLE);
+    return false;
+}
+
 void checkHardwareSecurity() {
     // Аварию мог обнаружить таймерный ISR: он только обесточил драйверы
     // и выставил флаг. FSM, NVS и Serial обновляем здесь, в контексте loop().

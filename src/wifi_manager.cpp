@@ -139,16 +139,11 @@ static bool handleGlobalCommands(const String& cmd) {
         return true;
     }
     if (cmd == "HOLD" || cmd == "!") {
-        if (currentMachineState == STATE_RUNNING || currentMachineState == STATE_JOGGING) {
-            changeState(STATE_HOLD);
-            return true;
-        }
+        // Запоминает, откуда пришли (RUNNING/JOGGING), см. state_manager.
+        return enterHold();
     }
     if (cmd == "RESUME" || cmd == "~") {
-        if (currentMachineState == STATE_HOLD) {
-            changeState(STATE_RUNNING); // при отказе changeState сам выдаст ERROR
-            return true;
-        }
+        return resumeFromHold();
     }
     // Динамический Override скорости тоже должен быть доступен прямо во время пиления!
     if (cmd.startsWith("OVERRIDE=")) {

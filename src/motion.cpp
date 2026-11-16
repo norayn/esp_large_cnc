@@ -203,6 +203,9 @@ void requestMotionStop() {
     isVectorMoving = false;
     isPlannerBusy = false;
     isGeneratorSuspendedOnHold = false;
+    // Следующая пауза не должна гаситься от скорости, которая была до STOP:
+    // иначе ramp HOLD стартует с устаревшего значения и тормозит «в пустоту».
+    sharedCurrentVelocity = 0.0f;
 
     // Таймер снова включаем: ISR шагов не выдаёт (motionStopRequested), но
     // продолжает следить за ESTOP/MOTORS_ALARM независимо от loop().
@@ -320,12 +323,87 @@ bool validateMachineTarget(float x, float y, float z, String* reason) {
 // СТРУКТУРНЫЙ БЛОК: НЕБЛОКИРУЮЩАЯ ПЕРЕДАЧА КАДРА МЕЖДУ ЯДРАМИ (Core 0)
 // ============================================================================
 
+// Пределы физики кадра (P1-4). Ниже них математика профиля перестаёт иметь
+// смысл: отрицательные длины сегментов, шаг длиной в секунды, NaN в sqrt.
+static const float MIN_FRAME_SPEED_MM_S = 0.1f;  // жёсткий низ скорости генерации
+// Один шаг не может длиться дольше 100 мс (10 шагов/с). Иначе при почти нулевой
+// подаче шаг растягивается на секунды и станок «зависает» на одном микрошаге.
+static const uint32_t MAX_STEP_TICK_CELLS = (uint32_t)(CNC_CELL_HZ / 10.0f);
+
+// Проверка физических параметров пакета. NaN/Inf из GUI (деление на 0 в
+// Look-Ahead) обязан отклонить кадр, а не превратить его в sqrt(-x) и вечный цикл.
+static bool validateFramePhysics(float feedRateMM_Sec, float accelMM_Sec2,
+                                 float vStartMM_Sec, float vEndMM_Sec, String* reason) {
+    auto fail = [reason](const char* msg) {
+        if (reason) *reason = msg;
+        return false;
+    };
+
+    if (!isfinite(feedRateMM_Sec) || !isfinite(accelMM_Sec2) ||
+        !isfinite(vStartMM_Sec) || !isfinite(vEndMM_Sec)) {
+        return fail("ERROR: Frame physics is not finite (NaN/Inf).");
+    }
+    if (feedRateMM_Sec <= 0.0f) {
+        return fail("ERROR: Frame feedrate must be > 0 mm/s.");
+    }
+    if (accelMM_Sec2 <= 0.0f) {
+        return fail("ERROR: Frame acceleration must be > 0 mm/s^2.");
+    }
+    return true;
+}
+
+// Скорость стыка в допустимом коридоре [низ, v_max]: выход за верхнюю границу
+// делает длины сегментов отрицательными (движение назад), ниже нижней —
+// растягивает шаг и рвёт непрерывность стыка с соседним кадром.
+static float clampJunctionSpeed(float v, float vMin, float vMax) {
+    if (!isfinite(v)) return vMin;
+    if (v < vMin) return vMin;
+    if (v > vMax) return vMax;
+    return v;
+}
+
+// Допуск на стык. Look-Ahead считает скорости во float, поэтому 1 % сверху —
+// это округление, а не ошибка планировщика; всё, что выше, — ошибка GUI.
+static const float JUNCTION_SPEED_TOL = 0.01f;
+
+// v_start/v_end больше подачи кадра — это не «немного быстро», а отрицательные
+// длины сегментов: первый сегмент поедет назад. Такой кадр не исполняем вообще.
+static bool validateJunctionSpeeds(float vMax, float vStartMM_Sec, float vEndMM_Sec,
+                                   String* reason) {
+    const float limit = vMax * (1.0f + JUNCTION_SPEED_TOL) + 0.01f;
+    if (vStartMM_Sec > limit || vEndMM_Sec > limit) {
+        if (reason) *reason = "ERROR: Junction speed exceeds frame feedrate (v_start/v_end > F).";
+        return false;
+    }
+    return true;
+}
+
 bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec,
-                          float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec) {
+                          float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec,
+                          String* reason) {
     // Защита от обхода проверки: даже если вызывающий забыл validateMachineTarget().
-    if (!validateMachineTarget(newX, newY, newZ)) return false;
+    if (!validateMachineTarget(newX, newY, newZ, reason)) return false;
+
+    // P1-4: пакет с F=0, отрицательным F или NaN не двигает станок вообще.
+    if (!validateFramePhysics(feedRateMM_Sec, accelMM_Sec2,
+                              vStartMM_Sec, vEndMM_Sec, reason)) {
+        return false;
+    }
 
     if (!armMotionTimer()) return false;
+
+    // P1-4: коридор скоростей стыка. Грубое превышение подачи — ошибка кадра:
+    // такой профиль поехал бы назад. В пределах допуска скорость зажимается.
+    // Нижняя граница — minVectorSpeed, но не выше подачи самого кадра: иначе
+    // медленный JOG (F=1 мм/мин = 0,017 мм/с) подскочил бы до 2 мм/с.
+    float vMax = feedRateMM_Sec;
+    if (!validateJunctionSpeeds(vMax, vStartMM_Sec, vEndMM_Sec, reason)) return false;
+
+    float vMin = cfg.minVectorSpeed;
+    if (!(vMin > MIN_FRAME_SPEED_MM_S)) vMin = MIN_FRAME_SPEED_MM_S;
+    if (vMin > vMax) vMin = vMax;
+    vStartMM_Sec = clampJunctionSpeed(vStartMM_Sec, vMin, vMax);
+    vEndMM_Sec   = clampJunctionSpeed(vEndMM_Sec, vMin, vMax);
 
     // P1-3: кадр не публикуется напрямую в motionTask, а кладётся в очередь.
     // Пока в очереди есть слот, Core 1 уже генерирует предыдущий кадр — станок
@@ -652,37 +730,43 @@ void motionTask(void * parameter) {
                     break;
                 }
 
-                // АППАРАТНАЯ ЗАМОРОЗКА ГЕОМЕТРИИ DDA НА ПАУЗЕ (Проверка перед каждым шагом)
-                // 1. Физическая заморозка геометрического шага DDA
-                if (currentMachineState == STATE_HOLD && virtualSpeedLimit  <= 0.001f) {
+                // --- 1. ФИЗИЧЕСКАЯ ЗАМОРОЗКА ГЕОМЕТРИИ DDA НА ПАУЗЕ ---
+                // Виртуальный лимит уже погашен до нуля: генератор стоит на
+                // границе шага, накопители Брезенхема не сдвигаются, в кольцо
+                // ничего не пишется. Уже выданные ячейки доигрывает ISR.
+                if (currentMachineState == STATE_HOLD && virtualSpeedLimit <= 0.001f) {
                     isGeneratorSuspendedOnHold = true;
 
-                    // Крутимся в легковесном цикле, пока удерживается пауза. 
+                    // Генератор честно не пишет: requestMotionStop() не должен
+                    // ждать его 100 мс при HOLD -> IDLE/ALARM и ругаться
+                    // таймаутом. Кольцо в этом состоянии чистить безопасно.
+                    isMotionGenerating = false;
+
+                    // Крутимся в легковесном цикле, пока удерживается пауза.
                     // Математика Брезенхема/DDA замерла строго на текущем шаге.
                     while (currentMachineState == STATE_HOLD) {
                         if (motionStopRequested || alarmRequested) break;
                         vTaskDelay(pdMS_TO_TICKS(5)); 
                     }
+
+                    if (motionStopRequested || alarmRequested) {
+                        frameAborted = true;
+                        break;
+                    }
+
+                    // RESUME: снова пишем такты. Индекс DDA, накопленная скорость
+                    // и накопители Брезенхема не сброшены, поэтому кадр
+                    // продолжается с той же точки — итоговая координата от паузы
+                    // не зависит, кольцо не очищается.
+                    isGeneratorSuspendedOnHold = false;
+                    isMotionGenerating = true;
                 }
 
                 if (motionStopRequested || alarmRequested) {
                     frameAborted = true;
                     break;
                 }
-
-                // 2. Выход из заморозки при нажатии RESUME.
-                // Буфер не очищаем: уже рассчитанные шаги должны быть доиграны,
-                // иначе теряется геометрия и plannerSteps уходит от реальности.
-                if (isGeneratorSuspendedOnHold && currentMachineState == STATE_RUNNING) {
-                    isGeneratorSuspendedOnHold = false;
-                }
                 // =====================================================
-
-                // Считаем частоту Master-оси на основе её реального вклада в пространственную траекторию:
-                float masterFrequency = currentVelocity * globalMasterStepsPerMm;
-            
-                // Защита от деления на ноль: частота не может быть ниже 1 Гц (1 шаг в секунду)
-                if (masterFrequency < 1.0f) masterFrequency = 1.0f;
 
                 // ВЫЧИСЛЯЕМ ЭФФЕКТИВНУЮ СКОРОСТЬ ВЕКТОРНОГО ШАГА:
                 // Берем текущую скорость из G-код трапеции (currentVelocity) 
@@ -692,19 +776,29 @@ void motionTask(void * parameter) {
                     effectiveVelocity = virtualSpeedLimit;
                 }
                 // Нижний предохранитель для стабильного наката на микро-скоростях
-                if (effectiveVelocity < 0.1f) effectiveVelocity = 0.1f;
+                if (effectiveVelocity < MIN_FRAME_SPEED_MM_S) {
+                    effectiveVelocity = MIN_FRAME_SPEED_MM_S;
+                }
             
                 // Считаем частоту шагов на основе эффективной скорости
                 float effectiveMasterFrequency = effectiveVelocity * globalMasterStepsPerMm;
                 if (effectiveMasterFrequency < 1.0f) effectiveMasterFrequency = 1.0f;
+
+                // OVERRIDE ограничен 0,1…2, но при 0 делитель дал бы inf → UB в
+                // приведении к uint32_t. Страхуемся явно.
+                float overrideFactor = smoothedFeedrateOverride;
+                if (!(overrideFactor > 0.01f)) overrideFactor = 0.01f;
             
                 // РАСЧЕТ ЗАДЕРЖКИ ТАЙМЕРА:
                 // Но теперь частота плавно падает до нуля и плавно растет при старте за счет effectiveMasterFrequency!
                 // uint32_t, а не uint16_t: при 1 Гц задержка = 100 000 ячеек и
                 // раньше переполняла 16 бит (100000 mod 65536 = 34464).
-                uint32_t ticksPerStep = (uint32_t)( BASE_CNC_FREQ / (effectiveMasterFrequency * smoothedFeedrateOverride ));
+                uint32_t ticksPerStep = (uint32_t)( BASE_CNC_FREQ / (effectiveMasterFrequency * overrideFactor) );
             
                 if (ticksPerStep < 1) ticksPerStep = 1;
+                // P1-4: верхний предохранитель. Без него подача, близкая к нулю,
+                // растягивала один шаг на 100 000 ячеек = 1 с («ползок»).
+                if (ticksPerStep > MAX_STEP_TICK_CELLS) ticksPerStep = MAX_STEP_TICK_CELLS;
             
             
                 // 3. РАСЧЕТ РЕАЛЬНОГО ФИЗИЧЕСКОГО ВРЕМЕНИ ДЛИТЕЛЬНОСТИ ТЕКУЩЕГО ШАГА

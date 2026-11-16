@@ -90,10 +90,13 @@ bool executeNextProgramStep() {
 
     // Если все кадры из статического ОЗУ-буфера полностью закончились
     if (currentCommandIndex >= totalLoadedCommands) {
-        // Ждем, пока физическое движение полностью прекратится на столе
+        // Ждем, пока физическое движение полностью прекратится на столе.
+        // Из HOLD программу не закрываем: пауза не должна сама сниматься.
         if (!isPlannerBusy) {
-            changeState(STATE_IDLE); 
-            Serial.println("STATUS: Program finished successfully.");
+            if (currentMachineState == STATE_RUNNING) {
+                changeState(STATE_IDLE);
+                Serial.println("STATUS: Program finished successfully.");
+            }
         }
         return false;
     }
@@ -141,29 +144,28 @@ bool executeNextProgramStep() {
         machineZ += deltaX_from_A * slopeZ;
     }
 
-    // P0-8: не запускаем кадр за пределы рабочего поля и не двигаемся частично.
+    // P0-8 + P1-4: не запускаем кадр за пределы поля и с битой физикой
+    // (F<=0, NaN/Inf, v_start/v_end вне коридора). Причина уже лежит в limitErr.
     String limitErr;
-    if (!validateMachineTarget(machineX, machineY, machineZ, &limitErr)) {
-        Serial.println(limitErr);
-        sendToWiFiClient(limitErr);
-        changeState(STATE_IDLE); // остановить программу, а не ехать дальше
-        return false;
+    if (!prepareVectorSegment(machineX, machineY, machineZ, cmd.f,
+                              cfg.maxAcceleration, cmd.v_start, cmd.v_end, &limitErr)) {
+        if (limitErr.length() > 0) {
+            Serial.println(limitErr);
+            sendToWiFiClient(limitErr);
+            changeState(STATE_IDLE); // остановить программу, а не ехать дальше
+        }
+        return false; // пусто = STOP/ALARM, состояние уже сменено извне
     }
 
-    // Передаем 7 параметров. Скорости v_start и v_end уже лежат в структуре cmd,
-    // так как их рассчитал и прислал Look-Ahead модуль на Python!
-    bool queued = prepareVectorSegment(machineX, machineY, machineZ, cmd.f,
-                                       cfg.maxAcceleration, cmd.v_start, cmd.v_end);
-
     // Если включен покадровый режим, взводим флаг ожидания для СЛЕДУЮЩЕГО кадра
-    if (queued && isSingleBlockMode) {
+    if (isSingleBlockMode) {
         waitNextBlockTrigger = true;
         Serial.printf("STATUS: Block %d executed. Waiting next block trigger...\n", currentCommandIndex - 1);
         // Шлем в сокет оповещение для Python, чтобы кнопка "След. Кадр" стала активной
         extern void sendToWiFiClient(String message);
         sendToWiFiClient("SINGLE_BLOCK_WAIT");
     }
-    return queued;
+    return true;
 }
 
 // Протокольные пределы JOG: F задаётся в мм/мин, как в обычном G-коде.

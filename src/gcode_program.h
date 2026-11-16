@@ -12,7 +12,7 @@ struct __attribute__((packed)) BinaryCommand {
     float x;            // Координата X (мм)
     float y;            // Координата Y (мм)
     float z;            // Координата Z (мм)
-    float f;            // Рабочая подача (мм/мин)
+    float f;            // Подача кадра (мм/с — в таком виде приходит в пакете B:)
     float v_start;      // Скорость входа от Python Look-Ahead (мм/сек)
     float v_end;        // Скорость выхода на стыке от Python Look-Ahead (мм/сек)     
 };

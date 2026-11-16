@@ -87,9 +87,12 @@ enum HomingResult {
 
 // Прототипы функций модуля движения
 void initMotion();
-// false = кадр не поставлен в очередь (стоп/авария/некорректная цель).
+// false = кадр не поставлен в очередь (стоп/авария/некорректная цель/физика).
+// reason (если задан) получает текст ошибки; пусто — кадр отклонён не по физике
+// (STOP/ALARM), а потому сообщать пользователю нечего.
 bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec,
-                          float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec);
+                          float accelMM_Sec2, float vStartMM_Sec, float vEndMM_Sec,
+                          String* reason = nullptr);
 void updateCurvaturePoint(int index, float y_off, float z_off);
 CorrectionPoint getCorrection(float currentX);
 HomingResult homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps);
