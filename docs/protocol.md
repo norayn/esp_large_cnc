@@ -135,6 +135,7 @@ MAP_LOAD:IDX=<i>;Y=<offset>;Z=<offset>
 - `ERROR: Add to RAM buffer failed`, `ERROR: Look-Ahead binary packet corrupt! …`, `ERROR: Frame …` (битая физика кадра).
 - Скан и калибровка: `ERROR: SCAN_GEOMETRY requires finite START/END, STEP>0, END>START and SPEED>0.`, `ERROR: SCAN_GEOMETRY SPEED must be 1..20000 mm/min.`, `ERROR: SCAN_GEOMETRY needs more than 2000 points. Increase STEP.`, `ERROR: laserMapSize must be 1..250.`, `ERROR: laserGridStep must be > 0 mm.`, `ERROR: A scan is already running.` Отказ приходит до перехода в `STATE_CALIBRATION`, станок остаётся в `IDLE`.
 - `ERROR: Endstop chain is open before homing. …` — общая NC-цепь концевиков разомкнута, `HOME` не начат ([homing.md §3.4](homing.md#34-хоуминг)).
+- `ERROR: laserMapSize must be 1..250 (was N).`, `ERROR: laserGridStep must be finite and > 0 mm.` — `SET_CONFIG` отклонён, прежние значения карты сохранены ([geometry.md §5.3](geometry.md#53-оптическая-карта-провиса-фермы)).
 
 ---
 
