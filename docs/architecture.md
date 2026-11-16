@@ -19,9 +19,9 @@
 
 **Межъядерная синхронизация (P1-2):**
 
-- `xferMux` защищает передачу кадра `nextSeg` (producer — Core 0, consumer — `motionTask`). Флаг `hasNewData` взводится только после записи полей.
+- `xferMux` защищает межъядерную очередь кадров `frameQueue` (producer — Core 0, consumer — `motionTask`). Индексы и счётчик меняются в одной критической секции, поэтому недописанный кадр другое ядро не увидит.
 - `ringMux` защищает индексы/ячейки `stepRingBuffer` и снимок `plannerSteps*` при обмене Core 0 ↔ Core 1 (хоуминг, `requestMotionStop()`).
-- `isMotionGenerating` показывает, что `motionTask` реально пишет шаги. `requestMotionStop()` сначала отменяет `nextSeg`, ждёт сброса флага (до 100 мс), и только потом очищает кольцо и синхронизирует `plannerSteps*` с `currentSteps*`. Это закрывает гонку «стоп во время генерации кадра».
+- `isMotionGenerating` показывает, что `motionTask` реально пишет шаги. `requestMotionStop()` сначала очищает очередь кадров, ждёт сброса флага (до 100 мс), и только потом очищает кольцо и синхронизирует `plannerSteps*` с `currentSteps*`. Это закрывает гонку «стоп во время генерации кадра».
 - `motionTask` пишет кольцо на том же ядре, что и ISR, поэтому отдельный лок ему не нужен; ISR берёт `ringMux` только против Core 0.
 - `isGeneratorSuspendedOnHold`, `virtualSpeedLimit`, `smoothedFeedrateOverride`, `sharedCurrentVelocity` объявлены `volatile`.
 
