@@ -39,11 +39,15 @@ void setup() {
     // Порт для лазера ESP32-CAM (длина строк малая, оставляем дефолтным)
     Serial2.begin(115200, SERIAL_8N1, CAM_RX2_PIN, CAM_TX2_PIN);
 
-    // Инициализация аппаратного таймера (100 кГц)
-    cncTimer = timerBegin(0, 80, true); 
-    timerAttachInterrupt(cncTimer, &onTimerInterrupt, true); 
-    timerAlarmWrite(cncTimer, 10, true); 
-    timerAlarmEnable(cncTimer); 
+    // Инициализация аппаратного таймера: делитель 80 → 1 МГц, тревога каждые
+    // CNC_TIMER_TICK_US = 5 мкс → 200 кГц. ISR двухфазный, поэтому ячейка
+    // кольца (полный импульс STEP) занимает 10 мкс.
+    cncTimer = timerBegin(0, 80, true);
+    timerAttachInterrupt(cncTimer, &onTimerInterrupt, true);
+    timerAlarmWrite(cncTimer, CNC_TIMER_TICK_US, true);
+    timerAlarmEnable(cncTimer);
+    Serial.printf("SYSTEM: step timer %d us (%d kHz), ring cell %.0f us\n",
+                  CNC_TIMER_TICK_US, 1000 / CNC_TIMER_TICK_US, CNC_CELL_US);
 
     // Запуск фонового потока планировщика на Ядре 1
     startMotionTask(); 
