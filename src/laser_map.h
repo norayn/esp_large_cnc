@@ -4,6 +4,10 @@
 #include <Arduino.h>
 
 void initLaserMap();
+
+// Единственный читатель Serial2: разбирает ответы камеры OFFSET:Y=..;Z=.. и
+// складывает их в lastCam*. Живого контура нет — ответ забирает только скан
+// или калибровка (takeCamResponse), на движение во время реза он не влияет.
 void updateLaserMapCommunication();
 void exportMapToPC();
 void parseMapRowFromPC(String pcLine);

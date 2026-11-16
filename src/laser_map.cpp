@@ -28,6 +28,9 @@ void parseCamResponse(String line, float &y_off, float &z_off, bool &success) {
     }
 }
 
+// Читает Serial2 и разбирает ответы камеры. Это не живой контур: строки
+// OFFSET приходят только в ответ на MEASURE и забирает их скан/калибровка
+// через takeCamResponse(); движение во время реза они не корректируют (P1-9).
 void updateLaserMapCommunication() {
     while (Serial2.available() > 0) {
         char c = Serial2.read();
