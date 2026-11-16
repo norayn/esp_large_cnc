@@ -73,8 +73,10 @@ volatile long plannerStepsX = 0;
 volatile long plannerStepsY = 0;
 volatile long plannerStepsZ = 0;
 
-// Массив точек оптической лазерной карты коррекции провиса балки фермы (до 250 точек)
-static CorrectionPoint curvatureMap[250];
+// Массив точек оптической лазерной карты коррекции провиса балки фермы.
+// Размер — жёсткий предел CURVATURE_MAP_POINTS: cfg.laserMapSize не может
+// быть больше (P1-7).
+static CorrectionPoint curvatureMap[CURVATURE_MAP_POINTS];
 
 // Межъядерная очередь кадров (P1-3): Core 0 складывает готовые кадры,
 // Core 1 забирает по одному. Все три счётчика меняются только под xferMux,
@@ -164,6 +166,16 @@ void syncPlannerToActual() {
     portEXIT_CRITICAL(&ringMux);
 }
 
+// Конец последнего поставленного кадра в машинных координатах, мм. Это начало
+// следующего кадра: нужно нарезке длинного кадра по узлам карты (P1-7).
+void getPlannerPositionMm(float &x, float &y, float &z) {
+    portENTER_CRITICAL(&ringMux);
+    x = (float)plannerStepsX / cfg.stepsPerMmX;
+    y = (float)plannerStepsY / cfg.stepsPerMmY;
+    z = (float)plannerStepsZ / cfg.stepsPerMmZ;
+    portEXIT_CRITICAL(&ringMux);
+}
+
 // Мягкая остановка: выдача шагов прекращается сразу, очередь сбрасывается,
 // математическая база планировщика приравнивается к фактической позиции.
 void requestMotionStop() {
@@ -237,40 +249,80 @@ void initMotion() {
     bufferTail = 0;
     
     // Безопасное зануление всей лазерной карты при старте контроллера
-    for (int i = 0; i < 250; i++) {
+    for (int i = 0; i < CURVATURE_MAP_POINTS; i++) {
         curvatureMap[i].y_offset = 0.0f;
         curvatureMap[i].z_offset = 0.0f;
     }
 }
 
-// Запись точки лазерного сканирования из Python-интерфейса в ОЗУ станка
+// Запись точки лазерного сканирования из Python-интерфейса в ОЗУ станка.
+// P1-7: индекс проверяется и по конфигу, и по размеру массива — иначе
+// SET_CONFIG:laserMapSize=300 писал бы за пределы curvatureMap.
 void updateCurvaturePoint(int index, float y_off, float z_off) {
-    if (index >= 0 && index < cfg.laserMapSize) {
-        curvatureMap[index].y_offset = y_off;
-        curvatureMap[index].z_offset = z_off;
+    if (!isfinite(y_off) || !isfinite(z_off)) return;
+    if (index < 0 || index >= CURVATURE_MAP_POINTS) return;
+    if (index >= cfg.laserMapSize) return;
+
+    curvatureMap[index].y_offset = y_off;
+    curvatureMap[index].z_offset = z_off;
+}
+
+// Границы карты, при которых интерполяция имеет смысл. Без этого битый конфиг
+// (size 0, grid 0) давал деление на ноль и чтение за массивом.
+static bool curvatureMapUsable(int &size, float &grid) {
+    size = cfg.laserMapSize;
+    grid = cfg.laserGridStep;
+    if (size < 1 || size > CURVATURE_MAP_POINTS) return false;
+    if (!isfinite(grid) || grid <= 0.0f) return false;
+    return true;
+}
+
+// P1-7: конфиг карты, при котором запись и чтение остаются в пределах
+// curvatureMap, а интерполяция не делит на ноль.
+bool validateCurvatureConfig(String *reason) {
+    if (cfg.laserMapSize < 1 || cfg.laserMapSize > CURVATURE_MAP_POINTS) {
+        if (reason) {
+            *reason = "ERROR: laserMapSize must be 1.." + String(CURVATURE_MAP_POINTS) +
+                      " (was " + String(cfg.laserMapSize) + ").";
+        }
+        return false;
     }
+    if (!isfinite(cfg.laserGridStep) || cfg.laserGridStep <= 0.0f) {
+        if (reason) *reason = "ERROR: laserGridStep must be finite and > 0 mm.";
+        return false;
+    }
+    return true;
 }
 
 // Линейная микронная интерполяция провиса фермы между двумя ближайшими точками сканирования
 CorrectionPoint getCorrection(float currentX) {
+    CorrectionPoint corr = {0.0f, 0.0f};
+
+    int size = 0;
+    float grid = 0.0f;
+    if (!isfinite(currentX) || !curvatureMapUsable(size, grid)) return corr;
+
+    // Одна точка — интерполировать не между чем: поправка постоянна.
+    if (size == 1) return curvatureMap[0];
+
     if (currentX < 0.0f) currentX = 0.0f;
-    
+
     // Ограничиваем максимальную длину рабочей зоны по карте лазера
-    float max_len = (cfg.laserMapSize - 1) * cfg.laserGridStep;
+    float max_len = (size - 1) * grid;
     if (currentX > max_len) currentX = max_len;
 
     // Находим индекс левой опорной точки
-    int index = (int)(currentX / cfg.laserGridStep);
-    if (index >= cfg.laserMapSize - 1) return curvatureMap[cfg.laserMapSize - 1];
+    int index = (int)(currentX / grid);
+    if (index < 0) index = 0;
+    if (index >= size - 1) return curvatureMap[size - 1];
 
     // Вычисляем коэффициент положения (от 0.0 до 1.0) между точками
-    float t = (currentX - (index * cfg.laserGridStep)) / cfg.laserGridStep;
-    
-    CorrectionPoint corr;
+    float t = (currentX - (index * grid)) / grid;
+
     // Находим промежуточное смещение по Y и Z
     corr.y_offset = curvatureMap[index].y_offset + t * (curvatureMap[index+1].y_offset - curvatureMap[index].y_offset);
     corr.z_offset = curvatureMap[index].z_offset + t * (curvatureMap[index+1].z_offset - curvatureMap[index].z_offset);
-    
+
     return corr;
 }
 
@@ -377,6 +429,16 @@ static bool validateJunctionSpeeds(float vMax, float vStartMM_Sec, float vEndMM_
         return false;
     }
     return true;
+}
+
+bool validateFrameParameters(float feedRateMM_Sec, float accelMM_Sec2,
+                             float vStartMM_Sec, float vEndMM_Sec,
+                             String* reason) {
+    if (!validateFramePhysics(feedRateMM_Sec, accelMM_Sec2,
+                              vStartMM_Sec, vEndMM_Sec, reason)) {
+        return false;
+    }
+    return validateJunctionSpeeds(feedRateMM_Sec, vStartMM_Sec, vEndMM_Sec, reason);
 }
 
 bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_Sec,

@@ -13,6 +13,10 @@
 #define CNC_CELL_US (CNC_TIMER_TICK_US * 2.0f)
 #define CNC_CELL_HZ (1000000.0f / CNC_CELL_US)
 
+// Жёсткий предел карты провиса: столько точек помещается в curvatureMap.
+// cfg.laserMapSize валидируется по этому числу (P1-7).
+constexpr int CURVATURE_MAP_POINTS = 250;
+
 // Структура точки оптической лазерной карты
 struct CorrectionPoint {
     float y_offset;
@@ -66,9 +70,20 @@ bool consumeAlarmRequest();
 // Вызывать перед JOG/стартом УП, после аварии и после SET_HOMED_DEBUG.
 void syncPlannerToActual();
 
+// Конец последнего поставленного кадра в машинных координатах, мм
+// (база планировщика, а не фактические счётчики). Нужно нарезке кадра (P1-7).
+void getPlannerPositionMm(float &x, float &y, float &z);
+
 // Проверка точки в машинных координатах с учётом лазерной поправки Y/Z.
 // false = координата не конечна или выходит за minX…maxZ; reason — текст ошибки.
 bool validateMachineTarget(float x, float y, float z, String* reason = nullptr);
+
+// Проверка параметров кадра без постановки в очередь: физика (F, accel,
+// NaN/Inf) и коридор скоростей стыка. Нужна нарезке кадра (P1-7), чтобы
+// отклонить плохой кадр целиком, а не на его последнем куске.
+bool validateFrameParameters(float feedRateMM_Sec, float accelMM_Sec2,
+                             float vStartMM_Sec, float vEndMM_Sec,
+                             String* reason = nullptr);
 
 // Объявление межъядерной очереди кадров (P1-3). Слоты и индексы скрыты в
 // motion.cpp: наружу нужен только ответ «есть ли куда положить кадр».
@@ -95,6 +110,10 @@ bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_S
                           String* reason = nullptr);
 void updateCurvaturePoint(int index, float y_off, float z_off);
 CorrectionPoint getCorrection(float currentX);
+
+// P1-7: 1 <= laserMapSize <= CURVATURE_MAP_POINTS и laserGridStep > 0.
+// false = конфиг карты опасен (запись за массив / деление на ноль).
+bool validateCurvatureConfig(String* reason = nullptr);
 HomingResult homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps);
 void runFullHoming();
 void IRAM_ATTR onTimerInterrupt();

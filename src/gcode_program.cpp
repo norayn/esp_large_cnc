@@ -22,6 +22,127 @@ bool isAlignmentActive = false;
 static float slopeY = 0.0;
 static float slopeZ = 0.0;
 
+// ============================================================================
+// P1-7: НАРЕЗКА КАДРА ПО УЗЛАМ КАРТЫ ПРОВИСА
+// ============================================================================
+// Карта задана точками X = i * laserGridStep, между ними она линейна, а
+// motionTask берёт поправку Y/Z только на конце кадра. На длинном кадре
+// (например, G0 на 3 м) изгибы карты внутри кадра теряются, поэтому кадр
+// режется на куски не длиннее одного интервала сетки: тогда линейная
+// интерполяция поправки совпадает с картой.
+//
+// Нарезка живёт в фидере: один вызов executeNextProgramStep()/continuation
+// ставит один кусок. supervisorTask не блокируется на весь длинный ход,
+// телеметрия и STOP/ESTOP продолжают работать.
+struct SplitSegment {
+    bool active;
+    float fromX, fromY, fromZ;   // текущая точка нарезки (машинные координаты)
+    float toX, toY, toZ;         // конец исходного кадра
+    float feed, accel;
+    float vEnd;                  // скорость выхода исходного кадра
+    float entry;                 // скорость на текущей точке нарезки
+};
+static SplitSegment split = {false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+static void resetSplit() { split.active = false; }
+
+// Сетка мельче 0,1 мм не даёт точности (механика и карта грубее), зато дала бы
+// десятки тысяч кадров на один ход. Такую карту не нарезаем.
+static const float SPLIT_MIN_GRID_MM = 0.1f;
+
+bool isSplitActive() { return split.active; }
+
+// Ставит в очередь очередной кусок и сдвигает начало нарезки. false — кадр
+// отклонён (STOP/ALARM/лимит/физика); причина в *err, если она не пустая.
+static bool queueSplitPiece(bool &isLast, String *err) {
+    const float grid = cfg.laserGridStep;
+    const float span = split.toX - split.fromX;
+
+    // Ближайший узел карты строго внутри кадра; если его нет — кусок до конца.
+    float nextX = split.toX;
+    if (cfg.laserMapSize > 1 && isfinite(grid) && grid >= SPLIT_MIN_GRID_MM && span != 0.0f) {
+        // node > fromX (node < fromX при ходе назад) отсекает вырожденный
+        // кусок нулевой длины от ошибки округления float.
+        if (span > 0.0f) {
+            float node = (floorf(split.fromX / grid) + 1.0f) * grid;
+            if (node > split.fromX && node < split.toX) nextX = node;
+        } else {
+            float node = (ceilf(split.fromX / grid) - 1.0f) * grid;
+            if (node < split.fromX && node > split.toX) nextX = node;
+        }
+    }
+
+    isLast = (nextX == split.toX);
+    const float t = (span != 0.0f) ? (nextX - split.fromX) / span : 1.0f;
+    const float nextY = split.fromY + (split.toY - split.fromY) * t;
+    const float nextZ = split.fromZ + (split.toZ - split.fromZ) * t;
+
+    const float dx = nextX - split.fromX, dy = nextY - split.fromY, dz = nextZ - split.fromZ;
+    const float pieceLen = sqrtf(dx * dx + dy * dy + dz * dz);
+    const float rx = split.toX - nextX, ry = split.toY - nextY, rz = split.toZ - nextZ;
+    const float restLen = sqrtf(rx * rx + ry * ry + rz * rz);
+
+    // Куски коллинеарны, углов нет: ограничивает только разгон/торможение.
+    // Скорость стыка должна быть физически достижима — иначе подготовка кадра
+    // поднимет её клампом и на стыке кусков будет рывок. Поэтому:
+    //   v_in → v_out за длину куска (разгон ≤ a), и от v_out ещё нужно успеть
+    //   затормозить до v_end на остатке кадра.
+    const float vIn = split.entry;
+    float vOut = split.vEnd;
+    if (!isLast) {
+        vOut = split.feed;
+        const float vReach = sqrtf(vIn * vIn + 2.0f * split.accel * pieceLen);
+        if (vReach < vOut) vOut = vReach;
+        const float vBrake = sqrtf(split.vEnd * split.vEnd + 2.0f * split.accel * restLen);
+        if (vBrake < vOut) vOut = vBrake;
+    }
+
+    if (!prepareVectorSegment(nextX, nextY, nextZ, split.feed, split.accel,
+                              vIn, vOut, err)) {
+        return false;
+    }
+
+    split.fromX = nextX;
+    split.fromY = nextY;
+    split.fromZ = nextZ;
+    split.entry = vOut;
+    if (isLast) split.active = false;
+    return true;
+}
+
+// Готовит нарезку кадра от текущей базы планировщика до (toX, toY, toZ).
+static void beginSplit(float toX, float toY, float toZ, float feed, float accel,
+                       float vStart, float vEnd) {
+    getPlannerPositionMm(split.fromX, split.fromY, split.fromZ);
+    split.toX = toX;
+    split.toY = toY;
+    split.toZ = toZ;
+    split.feed = feed;
+    split.accel = accel;
+    split.vEnd = vEnd;
+    split.entry = vStart;
+    split.active = true;
+}
+
+// Продолжение нарезки JOG: вызывается из supervisorTask, пока FSM в JOGGING.
+// true = поставлен ещё один кусок, нарезка продолжается.
+bool continueManualJogSplit() {
+    if (!split.active) return false;
+
+    String err;
+    bool isLast = false;
+    if (!queueSplitPiece(isLast, &err)) {
+        resetSplit();
+        if (err.length() > 0) {
+            Serial.println(err);
+            sendToWiFiClient(err);
+            changeState(STATE_IDLE);
+        }
+        return false;
+    }
+    return split.active;
+}
+
 void initGCodeModule() {
     clearGCodeBuffer();
 
@@ -41,8 +162,9 @@ void initGCodeModule() {
 void clearGCodeBuffer() {
     totalLoadedCommands = 0;
     currentCommandIndex = 0;
-    
+
     memset(gcodeBuffer, 0, sizeof(gcodeBuffer));
+    split.active = false;
 }
 
 
@@ -77,6 +199,17 @@ void setWcsZero(char axis) {
 }
 
 // ЦЕНТРАЛЬНЫЙ ДИСПЕТЧЕР КОМАНД
+// Единый хвост после постановки кадра движения: покадровый режим ждёт
+// триггера, но только когда кадр (или вся его нарезка) уже в очереди.
+static void afterMotionFrameQueued() {
+    if (!isSingleBlockMode) return;
+
+    waitNextBlockTrigger = true;
+    Serial.printf("STATUS: Block %d executed. Waiting next block trigger...\n", currentCommandIndex - 1);
+    // Шлем в сокет оповещение для Python, чтобы кнопка «След. Кадр» стала активной
+    sendToWiFiClient("SINGLE_BLOCK_WAIT");
+}
+
 // P1-3: вызывается в цикле из supervisorTask, пока в очереди кадров есть место.
 // Возвращает true, если команда исполнена (индекс сдвинулся): тогда можно
 // немедленно взять следующую и держать конвейер заполненным.
@@ -86,6 +219,24 @@ bool executeNextProgramStep() {
         // Зависаем в этом состоянии, Ядро 1 крутит удержание, моторы стоят.
         // Выход из условия произойдет, когда Wi-Fi модуль сбросит waitNextBlockTrigger в false
         return false;
+    }
+
+    // 2. P1-7: доделываем нарезку предыдущего кадра. Индекс УП уже сдвинут,
+    // поэтому проверка «программа кончилась» идёт после нарезки.
+    if (split.active) {
+        String err;
+        bool isLast = false;
+        if (!queueSplitPiece(isLast, &err)) {
+            resetSplit();
+            if (err.length() > 0) {
+                Serial.println(err);
+                sendToWiFiClient(err);
+                changeState(STATE_IDLE);
+            }
+            return false;
+        }
+        if (isLast) afterMotionFrameQueued();
+        return true;
     }
 
     // Если все кадры из статического ОЗУ-буфера полностью закончились
@@ -104,7 +255,7 @@ bool executeNextProgramStep() {
     BinaryCommand cmd = gcodeBuffer[currentCommandIndex];
     const bool isMotion = (cmd.cmdType == 0 || cmd.cmdType == 1);
 
-    // 2. P1-3: неподвижные команды (M3/M5/M8/M9) — барьер конвейера.
+    // 3. P1-3: неподвижные команды (M3/M5/M8/M9) — барьер конвейера.
     // Класть их в очередь кадров нельзя: реле обязано сработать в своей точке
     // траектории, а не за несколько кадров до неё. Поэтому M-код исполняется
     // только после полного слива кольца тактов и очереди. Индекс при этом не
@@ -144,11 +295,33 @@ bool executeNextProgramStep() {
         machineZ += deltaX_from_A * slopeZ;
     }
 
-    // P0-8 + P1-4: не запускаем кадр за пределы поля и с битой физикой
-    // (F<=0, NaN/Inf, v_start/v_end вне коридора). Причина уже лежит в limitErr.
+    // P0-8: цель проверяется целиком до первого куска, иначе станок успел бы
+    // проехать часть пути и только потом узнать про лимит.
     String limitErr;
-    if (!prepareVectorSegment(machineX, machineY, machineZ, cmd.f,
-                              cfg.maxAcceleration, cmd.v_start, cmd.v_end, &limitErr)) {
+    if (!validateMachineTarget(machineX, machineY, machineZ, &limitErr)) {
+        Serial.println(limitErr);
+        sendToWiFiClient(limitErr);
+        changeState(STATE_IDLE);
+        return false;
+    }
+
+    // P1-4 + P1-7: физика и стыки проверяются на всём кадре, а не на последнем
+    // куске нарезки (иначе v_end > F всплыл бы после половины хода).
+    if (!validateFrameParameters(cmd.f, cfg.maxAcceleration, cmd.v_start, cmd.v_end,
+                                 &limitErr)) {
+        Serial.println(limitErr);
+        sendToWiFiClient(limitErr);
+        changeState(STATE_IDLE);
+        return false;
+    }
+
+    // P1-7: кадр режется по узлам карты провиса, по одному куску за вызов.
+    beginSplit(machineX, machineY, machineZ, cmd.f, cfg.maxAcceleration,
+               cmd.v_start, cmd.v_end);
+
+    bool isLast = false;
+    if (!queueSplitPiece(isLast, &limitErr)) {
+        resetSplit();
         if (limitErr.length() > 0) {
             Serial.println(limitErr);
             sendToWiFiClient(limitErr);
@@ -157,14 +330,7 @@ bool executeNextProgramStep() {
         return false; // пусто = STOP/ALARM, состояние уже сменено извне
     }
 
-    // Если включен покадровый режим, взводим флаг ожидания для СЛЕДУЮЩЕГО кадра
-    if (isSingleBlockMode) {
-        waitNextBlockTrigger = true;
-        Serial.printf("STATUS: Block %d executed. Waiting next block trigger...\n", currentCommandIndex - 1);
-        // Шлем в сокет оповещение для Python, чтобы кнопка "След. Кадр" стала активной
-        extern void sendToWiFiClient(String message);
-        sendToWiFiClient("SINGLE_BLOCK_WAIT");
-    }
+    if (isLast) afterMotionFrameQueued();
     return true;
 }
 
@@ -205,7 +371,11 @@ bool processSingleManualCommand(String line) {
         return false;
     }
 
-    float v_jog_base = cfg.minVectorSpeed; 
+    // Скорость входа/выхода JOG. Она не может быть выше подачи самого кадра:
+    // иначе v_start > F даёт отрицательный разгонный участок (P1-4). Медленный
+    // ручной ход (например, 60 мм/мин) идёт целиком на своей подаче.
+    const float feedMM_Sec = f_mm_min / 60.0f;
+    const float v_jog_base = (cfg.minVectorSpeed < feedMM_Sec) ? cfg.minVectorSpeed : feedMM_Sec;
 
     float machineX = x + wcsOffset.x;
     float machineY = y + wcsOffset.y;
@@ -219,8 +389,28 @@ bool processSingleManualCommand(String line) {
         return false;
     }
 
-    return prepareVectorSegment(machineX, machineY, machineZ, f_mm_min / 60.0f,
-                                cfg.maxAcceleration, v_jog_base, v_jog_base);
+    if (!validateFrameParameters(feedMM_Sec, cfg.maxAcceleration, v_jog_base, v_jog_base,
+                                 &limitErr)) {
+        Serial.println(limitErr);
+        sendToWiFiClient(limitErr);
+        return false;
+    }
+
+    // P1-7: JOG режется по узлам карты так же, как кадр УП. Первый кусок
+    // ставим здесь, остальные — continueManualJogSplit() из supervisorTask.
+    beginSplit(machineX, machineY, machineZ, feedMM_Sec, cfg.maxAcceleration,
+               v_jog_base, v_jog_base);
+
+    bool isLast = false;
+    if (!queueSplitPiece(isLast, &limitErr)) {
+        resetSplit();
+        if (limitErr.length() > 0) {
+            Serial.println(limitErr);
+            sendToWiFiClient(limitErr);
+        }
+        return false;
+    }
+    return true;
 }
 
 void setAlignmentPoint(char pointLetter) {
@@ -293,6 +483,7 @@ bool startProgramExecution() {
     // приравниваем виртуальные оси планировщика к реальному положению моторов на столе
     syncPlannerToActual();
 
+    resetSplit();             // P1-7: недоигранная нарезка прошлого запуска не нужна
     currentCommandIndex = 0; // Сброс указателя на начало массива в ОЗУ
     if (!changeState(STATE_RUNNING)) return false;
 

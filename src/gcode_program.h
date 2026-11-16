@@ -64,6 +64,12 @@ bool executeNextProgramStep();
 // Обработчик одиночных ручных команд (JOG). false = команда отклонена.
 bool processSingleManualCommand(String line);
 
+// P1-7: JOG режется по узлам карты провиса. isSplitActive() — нарезка ещё не
+// закончена, continueManualJogSplit() ставит следующий кусок (вызывать из
+// supervisorTask, пока FSM в JOGGING).
+bool isSplitActive();
+bool continueManualJogSplit();
+
 // true = программа запущена; false = отказ (ALARM, нет хоуминга или пустой буфер).
 bool startProgramExecution();
 

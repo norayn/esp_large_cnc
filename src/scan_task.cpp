@@ -17,8 +17,6 @@ static const unsigned long SCAN_SETTLE_MS = 600;
 static const unsigned long SCAN_CAM_TIMEOUT_MS = 1500;
 // Предохранитель по числу точек: STEP = 0,001 мм иначе дал бы миллионы кадров.
 static const int SCAN_MAX_POINTS = 2000;
-// Карта провиса лежит в статическом массиве curvatureMap[250] (motion.cpp).
-static const int LASER_MAP_POINTS_MAX = 250;
 
 enum ScanMode {
     SCAN_NONE = 0,
@@ -88,8 +86,11 @@ static void positionNextPoint() {
     }
 
     // Y и Z держим в нулях машинных координат: скан — это линия по X.
+    // Скорость стыка не выше подачи: медленный скан (1 мм/мин) иначе получил
+    // бы v_start > F и был бы отклонён как битая физика (P1-4).
+    const float vJunction = (cfg.minVectorSpeed < scanFeedMM_Sec) ? cfg.minVectorSpeed : scanFeedMM_Sec;
     if (!prepareVectorSegment(scanTargetX, 0.0f, 0.0f, scanFeedMM_Sec,
-                              cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed)) {
+                              cfg.maxAcceleration, vJunction, vJunction)) {
         // Кадр не поставлен: STOP/ALARM уже сменили состояние, дублировать нечего.
         finishScan("=== SCAN ABORTED ===", false);
         return;
@@ -247,14 +248,11 @@ bool startLaserMapCalibration() {
         return false;
     }
 
-    // P1-7 проверит конфиг целиком; здесь — минимум, без которого процедура
-    // вышла бы за массив curvatureMap[250] или поделила на ноль.
-    if (cfg.laserMapSize <= 0 || cfg.laserMapSize > LASER_MAP_POINTS_MAX) {
-        scanReport("ERROR: laserMapSize must be 1.." + String(LASER_MAP_POINTS_MAX) + ".");
-        return false;
-    }
-    if (!(cfg.laserGridStep > 0.0f) || !isfinite(cfg.laserGridStep)) {
-        scanReport("ERROR: laserGridStep must be > 0 mm.");
+    // Карта должна влезать в curvatureMap и не делить на ноль (P1-7):
+    // проверка общая с SET_CONFIG/NVS, чтобы сообщения не расходились.
+    String mapErr;
+    if (!validateCurvatureConfig(&mapErr)) {
+        scanReport(mapErr);
         return false;
     }
 

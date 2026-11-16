@@ -1,4 +1,5 @@
 #include "config.h"
+#include "motion.h"
 #include <Preferences.h>
 
 MachineConfig cfg;
@@ -15,6 +16,15 @@ bool  p_get(const char* key, bool def)  { return preferences.getBool(key, def); 
 
 void initMachineConfigDefault() {
 #define X(type, name, eeprom_key, default_val) cfg.name = default_val;
+    CONFIG_FIELDS
+#undef X
+}
+
+// P1-7: сброс только полей карты на дефолты из CONFIG_FIELDS — если в NVS
+// лежит мусор, не сбрасываем заодно stepsPerMm и лимиты станка.
+static void resetCurvatureConfigDefaults() {
+#define X(type, name, eeprom_key, default_val) \
+    if (String(#name) == "laserMapSize" || String(#name) == "laserGridStep") cfg.name = default_val;
     CONFIG_FIELDS
 #undef X
 }
@@ -43,6 +53,16 @@ void setupAndLoadConfig() {
 #undef X
 
     preferences.end();
+
+    // P1-7: битая карта из старой прошивки не должна дожить до первого кадра.
+    String cfgErr;
+    if (!validateCurvatureConfig(&cfgErr)) {
+        Serial.print("CONFIG: ");
+        Serial.print(cfgErr);
+        Serial.println(" Restoring laser map defaults.");
+        resetCurvatureConfigDefaults();
+        saveConfigToEEPROM();
+    }
 }
 
 void saveWcsToEEPROM() {
@@ -85,6 +105,9 @@ String handleConfigCommand(String cmd) {
             String targetKey = pair.substring(0, eq);
             String valStr = pair.substring(eq + 1);
             bool found = false;
+            // Прежние значения карты: при отказе валидации возвращаем их (P1-7).
+            const int oldMapSize = cfg.laserMapSize;
+            const float oldGridStep = cfg.laserGridStep;
 
             // Сравниваем имя со всеми полями из макроса автоматически
 #define X(type, name, eeprom_key, default_val) \
@@ -98,6 +121,15 @@ String handleConfigCommand(String cmd) {
 #undef X
 
             if (found) {
+                // P1-7: карта провиса проверяется до сохранения в NVS. Иначе
+                // laserMapSize=300 писал бы за пределы curvatureMap[250], а
+                // laserGridStep=0 дал бы деление на ноль в getCorrection().
+                String cfgErr;
+                if (!validateCurvatureConfig(&cfgErr)) {
+                    cfg.laserMapSize = oldMapSize;
+                    cfg.laserGridStep = oldGridStep;
+                    return cfgErr;
+                }
                 saveConfigToEEPROM(); // сохраняем обновленный конфиг
                 return "STATUS: Config parameter " + targetKey + " updated and saved.";
             } else {

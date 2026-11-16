@@ -138,6 +138,12 @@ static void supervisorTask(void *parameter) {
             }
         }
 
+        // P1-7: длинный JOG тоже режется по узлам карты, но продолжение идёт
+        // не из УП, а из этого цикла, пока FSM в JOGGING.
+        if (currentMachineState == STATE_JOGGING && isSplitActive()) {
+            while (canQueueFrame() && continueManualJogSplit()) { }
+        }
+
         // Плавное гашение подачи (HOLD / Пауза)
         updateFeedrateFading();
 
