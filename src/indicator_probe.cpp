@@ -1,10 +1,6 @@
 #include "indicator_probe.h"
 #include "pinout.h"
-#include "motion.h"
-#include "config.h"
-#include "wifi_manager.h"
 #include "state_manager.h"
-#include "gcode_program.h"
 
 void initIndicatorModule() {
     pinMode(INDICATOR_CLK, INPUT_PULLUP);
@@ -53,95 +49,4 @@ float readDialIndicator() {
     }
 
     return (float)value * sign / 100.0f;
-}
-
-
-void runGeometryScan(float startX, float endX, float stepX, float feedRateMM_Sec) {
-    Serial.println("=== START GEOMETRY SCAN ===");
-    sendToWiFiClient("=== START GEOMETRY SCAN ===");
-    Serial.println("X_POS;DIAL_INDICATOR;LASER_Y;LASER_Z");
-    sendToWiFiClient("X_POS;DIAL_INDICATOR;LASER_Y;LASER_Z");
-
-    // P0-4: скан стартует от фактической позиции, а не от старой базы.
-    syncPlannerToActual();
-
-    // Вычисляем направление движения
-    int stepsCount = abs((endX - startX) / stepX) + 1;
-    float currentX = startX;
-
-    for (int i = 0; i < stepsCount; i++) {
-        if (currentMachineState != STATE_CALIBRATION) return; // STOP/RESET во время скана
-
-        // P0-8: каждая точка проверяется до постановки в очередь.
-        String limitErr;
-        if (!validateMachineTarget(currentX, 0.0f, 0.0f, &limitErr)) {
-            Serial.println(limitErr);
-            sendToWiFiClient(limitErr);
-            return;
-        }
-
-        // Командуем планировщику ехать в точку замера (Y и Z удерживаем в нулях)
-        if (!prepareVectorSegment(currentX, 0.0f, 0.0f, feedRateMM_Sec,
-                                  cfg.maxAcceleration, cfg.minVectorSpeed, cfg.minVectorSpeed)) {
-            return;
-        }
-        while (isPlannerBusy) {
-            checkHardwareSecurity();
-            if (currentMachineState == STATE_ALARM) return;
-            delay(10);
-        }
-        
-        delay(600); // Стабилизация пространственной фермы после остановки
-
-        // 1. Опрос часового индикатора
-        float dialValue = readDialIndicator();
-        String dialStr = (dialValue == -999.0f) ? "DISCONNECTED" : String(dialValue, 3);
-
-        // 2. Опрос лазерного модуля ESP32-CAM с таймаутом проверки связи
-        Serial2.println("MEASURE");
-        unsigned long sWait = millis(); 
-        String laserResp = ""; 
-        bool laserConnected = false;
-
-        while (millis() - sWait < 1500) { // Таймаут 1.5 сек
-            checkHardwareSecurity();
-            if (currentMachineState != STATE_CALIBRATION) return;
-            
-            if (Serial2.available() > 0) {
-                char c = Serial2.read();
-                if (c == '\n' || c == '\r') {
-                    if (laserResp.length() > 0) { laserConnected = true; break; }
-                } else { laserResp += c; }
-            }
-            delay(1);
-        }
-
-        float laserY = 0.0f, laserZ = 0.0f;
-        String laserYStr = "DISCONNECTED";
-        String laserZStr = "DISCONNECTED";
-
-        if (laserConnected && laserResp.startsWith("OFFSET:")) {
-            int yIdx = laserResp.indexOf("Y="); 
-            int zIdx = laserResp.indexOf("Z="); 
-            int delim = laserResp.indexOf(';', yIdx);
-            if (yIdx != -1 && zIdx != -1 && delim != -1) {
-                laserY = laserResp.substring(yIdx + 2, delim).toFloat();
-                laserZ = laserResp.substring(zIdx + 2).toFloat();
-                laserYStr = String(laserY, 3);
-                laserZStr = String(laserZ, 3);
-            }
-        }
-
-        // 3. Формируем единую CSV-строку и выплевываем на ПК
-        String csvRow = String(currentX, 1) + ";" + dialStr + ";" + laserYStr + ";" + laserZStr;
-        Serial.println(csvRow);
-        sendToWiFiClient(csvRow);
-
-        // Шагаем дальше
-        if (endX > startX) currentX += stepX;
-        else currentX -= stepX;
-    }
-
-    Serial.println("=== END GEOMETRY SCAN ===");
-    sendToWiFiClient("=== END GEOMETRY SCAN ===");
 }

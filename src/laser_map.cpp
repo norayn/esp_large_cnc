@@ -8,7 +8,14 @@
 
 static String camBuffer = "";
 
-void initLaserMap() { camBuffer = ""; }
+// Последний разобранный ответ камеры. Нужен сканам: Serial2 читает только
+// updateLaserMapCommunication(), второй читатель украл бы строку.
+static float lastCamY = 0.0f;
+static float lastCamZ = 0.0f;
+static unsigned long lastCamRespMs = 0;
+static bool lastCamOk = false;
+
+void initLaserMap() { camBuffer = ""; lastCamOk = false; }
 
 void parseCamResponse(String line, float &y_off, float &z_off, bool &success) {
     success = false;
@@ -28,60 +35,27 @@ void updateLaserMapCommunication() {
             if (camBuffer.length() > 0) {
                 float y=0, z=0; bool ok=false;
                 parseCamResponse(camBuffer, y, z, ok);
+                if (ok) {
+                    lastCamY = y; lastCamZ = z;
+                    lastCamRespMs = millis();
+                    lastCamOk = true;
+                }
                 camBuffer = "";
             }
         } else { camBuffer += c; }
     }
 }
 
-void runAutoCalibration() {
-    Serial.println("STATUS: Starting laser map auto-calibration...");
-    
-    for (int i = 0; i < cfg.laserMapSize; i++) {
-        // Если станок уже в АВАРИИ, прекращаем итерации по точкам
-        if (currentMachineState == STATE_ALARM) {
-            Serial.println("ERROR: Calibration cancelled. Machine is in ALARM state.");
-            return;
-        }
+// Ответ камеры забирается один раз: сканы ждут именно свою порцию, а не
+// любую строку из буфера.
+bool takeCamResponse(unsigned long sinceMs, float &y_off, float &z_off) {
+    if (!lastCamOk) return false;
+    if ((long)(lastCamRespMs - sinceMs) < 0) return false; // ответ старше запроса
 
-        // 1. Позиционируем каретку в точку X
-        float targetX = i * cfg.laserGridStep;
-        // Команда на перемещение в машинных координатах...
-        
-        // 2. Ждем остановки физических осей
-        while (isPlannerBusy) {
-            checkHardwareSecurity();
-            if (currentMachineState == STATE_ALARM) return;
-            delay(10);
-        }
-        
-        // Пауза на гашение вибраций станины
-        delay(500); 
-        
-        // 3. Запрос к камере
-        Serial2.println("MEASURE");
-        unsigned long sWait = millis(); String resp = ""; bool rec = false;
-        while (millis() - sWait < 2000) {
-            
-            
-            if (Serial2.available() > 0) {
-                char c = Serial2.read();
-                if (c == '\n' || c == '\r') { if (resp.length() > 0) { rec = true; break; } }
-                else { resp += c; }
-            }
-            delay(1);
-        }
-
-        if (rec) {
-            float y = 0, z = 0; bool pOk = false;
-            parseCamResponse(resp, y, z, pOk);
-            if (pOk) {
-                updateCurvaturePoint(i, y, z);
-                String dataLog = "DATA: Point " + String(i) + " -> Y=" + String(y) + ", Z=" + String(z);
-                Serial.println(dataLog); sendToWiFiClient(dataLog);
-            }
-        }
-    }
+    y_off = lastCamY;
+    z_off = lastCamZ;
+    lastCamOk = false;
+    return true;
 }
 
 void exportMapToPC() {

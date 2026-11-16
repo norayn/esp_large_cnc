@@ -7,6 +7,7 @@
 #include "state_manager.h"
 #include "wifi_manager.h"
 #include "indicator_probe.h"
+#include "scan_task.h"
 #include "safety_inputs.h"
 
 hw_timer_t * cncTimer = NULL;
@@ -98,6 +99,7 @@ static void supervisorTask(void *parameter) {
         reportStatusToPC();
         updateWiFiCommunication();
         updateLaserMapCommunication();
+        updateScanTask(); // P1-8: один шаг скана за круг, loop() не блокируется
 
         // ОБРАБОТКА КОМАНД ИЗ USB-UART ПОРТА ПК
         while (Serial.available() > 0) {

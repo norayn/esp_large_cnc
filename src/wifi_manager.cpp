@@ -3,6 +3,7 @@
 #include "gcode_program.h"
 #include "state_manager.h"
 #include "laser_map.h"
+#include "scan_task.h"
 #include "config.h"
 #include "motion.h"
 
@@ -184,11 +185,11 @@ static bool handleIdleCommands(const String& cmd) {
         return false;
     }
     if (cmd == "START_CALIBRATION") {
-        if (!changeState(STATE_CALIBRATION)) return true; // отказ: ERROR уже отправлен
-        runAutoCalibration();
-        if (currentMachineState == STATE_CALIBRATION) changeState(STATE_IDLE);
+        // P1-8: только запуск. Дальше калибровку ведёт updateScanTask() по шагам,
+        // поэтому телеметрия и ESTOP работают всё время процедуры.
+        startLaserMapCalibration();
         return true;
-    } 
+    }
     if (cmd == "EXPORT_MAP") {
         if (!changeState(STATE_MAP_TRANSFER)) return true;
         exportMapToPC();
@@ -258,27 +259,17 @@ static bool handleIdleCommands(const String& cmd) {
             // P0-7: SPEED в SCAN_GEOMETRY — мм/мин (как в GUI и G-коде).
             float speedMmMin = data.substring(idx3 + 1).toFloat();
 
-            if (!isfinite(startX) || !isfinite(endX) || !isfinite(stepX) ||
-                !isfinite(speedMmMin) || stepX <= 0.0f || startX == endX ||
-                speedMmMin < 1.0f || speedMmMin > 20000.0f) {
-                String err = "ERROR: SCAN_GEOMETRY requires finite START/END, STEP>0 and SPEED 1..20000 mm/min.";
+            // Диапазон SPEED — свойство протокола (мм/мин, P0-7). Остальные
+            // параметры и лимиты поля проверяет сам движок скана (P1-8), до
+            // перехода в CALIBRATION.
+            if (!isfinite(speedMmMin) || speedMmMin < 1.0f || speedMmMin > 20000.0f) {
+                String err = "ERROR: SCAN_GEOMETRY SPEED must be 1..20000 mm/min.";
                 Serial.println(err); sendToWiFiClient(err);
                 return true;
             }
 
-            // P0-8: скан не начинаем, если любая крайняя точка вне поля.
-            String limitErr;
-            if (!validateMachineTarget(startX, 0.0f, 0.0f, &limitErr) ||
-                !validateMachineTarget(endX, 0.0f, 0.0f, &limitErr)) {
-                Serial.println(limitErr); sendToWiFiClient(limitErr);
-                return true;
-            }
-
-            if (!changeState(STATE_CALIBRATION)) return true; // отказ: ERROR уже отправлен
-            extern void runGeometryScan(float startX, float endX, float stepX, float feedRateMM_Sec);
-            runGeometryScan(startX, endX, stepX, speedMmMin / 60.0f);
-            if (currentMachineState == STATE_CALIBRATION) changeState(STATE_IDLE);
-            return true; // Команда успешно выполнена
+            startGeometryScan(startX, endX, stepX, speedMmMin / 60.0f);
+            return true; // Команда принята
         }
         return false;
     }

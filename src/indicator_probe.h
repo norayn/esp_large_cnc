@@ -10,8 +10,7 @@ void initIndicatorModule();
 // Возвращает значение в мм. Если датчик отключен, возвращает -999.0
 float readDialIndicator();
 
-// Функция запуска комплексного замера геометрии вдоль оси X
-// На входе: начальная координата X, конечная X, шаг замера, скорость подачи (мм/с)
-void runGeometryScan(float startX, float endX, float stepX, float feedRateMM_Sec);
+// Сам скан геометрии живёт в scan_task.cpp (P1-8): он идёт по шагам из
+// supervisorTask, а не блокирует loop() на всё время процедуры.
 
 #endif

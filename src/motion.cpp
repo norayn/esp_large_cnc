@@ -4,6 +4,7 @@
 #include "gcode_program.h"
 #include "state_manager.h"
 #include "safety_inputs.h"
+#include "wifi_manager.h"
 #include <Arduino.h>
 
 // Аппаратный таймер создаётся в main.cpp; нужен для остановки/запуска выдачи шагов.
@@ -1211,6 +1212,15 @@ static float homingAxisStepsPerMm(int stepPin) {
 HomingResult homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisSteps, int endstopPin, long pullOffSteps) {
     isHomingActive = true;
 
+    // P1-6: концевики всех осей — одна NC-цепь. Разомкнутая цепь на входе значит,
+    // что какая-то ось уже стоит на своём концевике: поиск этой оси «нашёл бы
+    // базу» на первом же шаге. Отказываемся вместо ложной базы.
+    if (digitalRead(endstopPin) == HIGH) {
+        Serial.println("HOMING: ERROR - endstop chain is already open (another axis is on its endstop).");
+        isHomingActive = false;
+        return HOMING_FAILED;
+    }
+
     // Ограничение хода и времени поиска: заведомо больше рабочего поля + запас.
     float travelMm = homingAxisTravelMm(stepPin);
     float stepsPerMm = homingAxisStepsPerMm(stepPin);
@@ -1315,6 +1325,18 @@ HomingResult homeAxis(int stepPin, int dirPin, int dirSign, volatile long &axisS
 
 // Главный последовательный автомат поиска баз ЧПУ (Вызывается из handleIdleCommands на Core 0)
 void runFullHoming() {
+    // P1-6: концевики X, Y и Z висят на одной NC-цепи, отдельного входа на ось
+    // нет — так решено на этапе железа. Поэтому перед циклом цепь обязана быть
+    // замкнутой: иначе какая-то ось уже на концевике, и её «база» была бы взята
+    // без движения. Оператор снимает оси с концевиков вручную и повторяет HOME.
+    if (digitalRead(ENDSTOPS_PIN) == HIGH) {
+        const char* msg = "ERROR: Endstop chain is open before homing. An axis sits on its endstop: "
+                          "move it off manually, check the wiring, then run HOME again.";
+        Serial.println(msg);
+        sendToWiFiClient(msg);
+        return; // состояние не меняем: станок остаётся в IDLE
+    }
+
     changeState(STATE_HOMING);
     // Переход мог быть отклонён (ALARM / запрет) — тогда хоуминг не начинаем.
     if (currentMachineState != STATE_HOMING) return;
