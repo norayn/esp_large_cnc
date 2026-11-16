@@ -75,8 +75,13 @@ volatile long plannerStepsZ = 0;
 // Массив точек оптической лазерной карты коррекции провиса балки фермы (до 250 точек)
 static CorrectionPoint curvatureMap[250];
 
-// Объявление структуры-посредника неблокирующего обмена кадрами между Ядром 0 и Ядром 1
-volatile InputSegment nextSeg = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
+// Межъядерная очередь кадров (P1-3): Core 0 складывает готовые кадры,
+// Core 1 забирает по одному. Все три счётчика меняются только под xferMux,
+// поэтому другой ядро всегда видит согласованное состояние (без флага-отмашки).
+static InputSegment frameQueue[FRAME_QUEUE_SIZE];
+static uint8_t frameHead  = 0; // слот для записи (Core 0)
+static uint8_t frameTail  = 0; // слот для чтения (Core 1)
+static uint8_t frameCount = 0; // количество занятых слотов
 
 // ============================================================================
 // МЕЖЪЯДЕРНАЯ СИНХРОНИЗАЦИЯ (P1-2)
@@ -86,13 +91,37 @@ volatile InputSegment nextSeg = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false
 // кольцо на том же ядре, что и ISR, поэтому ему отдельный лок не нужен.
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 
-// xferMux защищает передачу кадра nextSeg между Core 0 (producer) и Core 1
-// (motionTask). Вместе с hasNewData он закрывает окно «стоп во время передачи».
+// xferMux защищает межъядерную очередь кадров frameQueue (Core 0 — producer,
+// Core 1 — consumer). Индексы и счётчик меняются только под ним, поэтому
+// «стоп во время передачи» закрывается без отдельного флага-отмашки.
 static portMUX_TYPE xferMux = portMUX_INITIALIZER_UNLOCKED;
 
 // true, пока motionTask реально генерирует шаги текущего кадра. По нему
 // requestMotionStop() на Core 0 понимает, что кольцо уже никто не пишет.
 static volatile bool isMotionGenerating = false;
+
+// Вызывать только под xferMux.
+static void clearFrameQueueLocked() {
+    frameHead  = 0;
+    frameTail  = 0;
+    frameCount = 0;
+}
+
+bool canQueueFrame() {
+    bool hasRoom;
+    portENTER_CRITICAL(&xferMux);
+    hasRoom = (frameCount < FRAME_QUEUE_SIZE);
+    portEXIT_CRITICAL(&xferMux);
+    return hasRoom;
+}
+
+uint8_t queuedFrameCount() {
+    uint8_t n;
+    portENTER_CRITICAL(&xferMux);
+    n = frameCount;
+    portEXIT_CRITICAL(&xferMux);
+    return n;
+}
 
 
 // ============================================================================
@@ -141,10 +170,10 @@ void requestMotionStop() {
 
     if (cncTimer != nullptr) timerAlarmDisable(cncTimer);
 
-    // Отменяем подготовленный, но ещё не принятый кадр. Лок закрывает окно,
-    // когда motionTask уже собирается взвести isMotionGenerating.
+    // Отменяем все подготовленные, но ещё не сгенерированные кадры. Лок
+    // закрывает окно, когда motionTask уже собирается взять кадр из очереди.
     portENTER_CRITICAL(&xferMux);
-    nextSeg.hasNewData = false;
+    clearFrameQueueLocked();
     portEXIT_CRITICAL(&xferMux);
 
     // Ждём, пока генератор на Core 1 корректно прервёт текущий кадр.
@@ -298,40 +327,46 @@ bool prepareVectorSegment(float newX, float newY, float newZ, float feedRateMM_S
 
     if (!armMotionTimer()) return false;
 
-    // Блокировка от затирания: ждем, пока Ядро 1 заберет предыдущий пакет
-    while (nextSeg.hasNewData) { 
+    // P1-3: кадр не публикуется напрямую в motionTask, а кладётся в очередь.
+    // Пока в очереди есть слот, Core 1 уже генерирует предыдущий кадр — станок
+    // не ждёт полного слива кольца на стыке и проходит его без остановки.
+    // Ждём только если все слоты заняты: это значит, что Core 1 не успевает
+    // (кольцо тактов заполнено) и торопить его бессмысленно.
+    for (;;) {
+        bool queued = false;
+
+        // Публикация кадра атомарна относительно Core 1: индексы и счётчик
+        // меняются в одной критической секции, недописанный слот другой ядро
+        // не увидит.
+        portENTER_CRITICAL(&xferMux);
+        if (frameCount < FRAME_QUEUE_SIZE) {
+            InputSegment &slot = frameQueue[frameHead];
+            slot.x       = newX;
+            slot.y       = newY;
+            slot.z       = newZ;
+            slot.accel   = accelMM_Sec2;
+            slot.v_frame = feedRateMM_Sec; // мм/с — то, что нужно физике Core 1
+            slot.v_start = vStartMM_Sec;   // готовые скорости стыка от Look-Ahead Python
+            slot.v_end   = vEndMM_Sec;
+
+            frameHead = (frameHead + 1) % FRAME_QUEUE_SIZE;
+            frameCount++;
+
+            // Флаги движения поднимаем в той же секции, что и запись кадра:
+            // Core 1 не увидит «кадр без движения» или наоборот.
+            isPlannerBusy  = true;
+            isVectorMoving = true;
+            queued = true;
+        }
+        portEXIT_CRITICAL(&xferMux);
+
+        if (queued) return true;
+
+        // Очередь заполнена. Остановка/авария прерывает ожидание, иначе
+        // Core 0 не должен висеть дольше одного кадра генерации.
         if (motionStopRequested || alarmRequested) return false;
-        delay(1); 
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
-
-    // Остановка могла прийти, пока ждали освобождения посредника.
-    if (motionStopRequested || alarmRequested) return false;
-    
-    // Публикуем кадр атомарно относительно Core 1: либо motionTask увидит
-    // старый hasNewData=false, либо уже полностью заполненную структуру.
-    portENTER_CRITICAL(&xferMux);
-    nextSeg.x = newX; 
-    nextSeg.y = newY; 
-    nextSeg.z = newZ;
-    nextSeg.accel = accelMM_Sec2;
-    
-    // Подача кадра  мм/секунду для физических формул Ядра 1
-    nextSeg.v_frame = feedRateMM_Sec; 
-    
-    // Принимаем готовые Look-Ahead скорости сопряжения от Python (они уже в мм/сек)
-    nextSeg.v_start = vStartMM_Sec;         
-    nextSeg.v_end = vEndMM_Sec;             
-    
-    // Флаги движения взводим ДО публикации кадра: иначе Core 1 может успеть
-    // обработать и опустошить кадр, а затем мы перезапишем isPlannerBusy=true.
-    isPlannerBusy  = true;
-    isVectorMoving = true;
-
-    // Атомарная отмашка для потока Ядра 1
-    nextSeg.hasNewData = true;
-    portEXIT_CRITICAL(&xferMux);
-
-    return true;
 }
 
 // ============================================================================
@@ -355,7 +390,7 @@ void motionTask(void * parameter) {
             portENTER_CRITICAL(&xferMux);
             stillStopped = (motionStopRequested || alarmRequested);
             if (stillStopped) {
-                nextSeg.hasNewData = false;
+                clearFrameQueueLocked();
                 isMotionGenerating = false;
                 isVectorMoving = false;
                 isPlannerBusy = false;
@@ -376,22 +411,26 @@ void motionTask(void * parameter) {
         bool hasSegment = false;
 
         portENTER_CRITICAL(&xferMux);
-        if (nextSeg.hasNewData) {
-            nX = nextSeg.x;
-            nY = nextSeg.y;
-            nZ = nextSeg.z;
-            accel = nextSeg.accel;
-            v_max   = nextSeg.v_frame; // Ограничение подачи кадра от CAM
-            v_start = nextSeg.v_start; // Скорость входа от Look-Ahead Python
-            v_end   = nextSeg.v_end;   // Скорость выхода на стыке угла от Look-Ahead Python
+        if (frameCount > 0) {
+            const InputSegment &slot = frameQueue[frameTail];
+            nX = slot.x;
+            nY = slot.y;
+            nZ = slot.z;
+            accel = slot.accel;
+            v_max   = slot.v_frame; // Ограничение подачи кадра от CAM
+            v_start = slot.v_start; // Скорость входа от Look-Ahead Python
+            v_end   = slot.v_end;   // Скорость выхода на стыке угла от Look-Ahead Python
 
-            nextSeg.hasNewData = false; // Мгновенный Handshake: освобождаем ячейку для Ядра 0
+            frameTail = (frameTail + 1) % FRAME_QUEUE_SIZE;
+            frameCount--;
+
+            // Освободили слот для Core 0 и сразу занимаемся этим кадром.
             isMotionGenerating = true;
             hasSegment = true;
         } else if (bufferTail == bufferHead) {
-            // Новых данных нет и кольцо пусто. Проверка и сброс isPlannerBusy
-            // под тем же xferMux, что и публикация кадра: иначе Core 0 может
-            // опубликовать кадр между проверкой и записью false.
+            // Очередь пуста и кольцо пусто. Только в этот момент движение
+            // действительно закончилось: isPlannerBusy = false — это «станок
+            // стоит и шагов больше не будет», а не «кадр отдан в генерацию».
             isPlannerBusy = false;
         }
         portEXIT_CRITICAL(&xferMux);
@@ -401,13 +440,13 @@ void motionTask(void * parameter) {
             continue;
         }
 
-        // STOP/ALARM могли прийти сразу после handshake.
+        // STOP/ALARM могли прийти сразу после того, как кадр взят из очереди.
         if (motionStopRequested || alarmRequested) {
             portENTER_CRITICAL(&xferMux);
             isMotionGenerating = false; // отпускаем requestMotionStop()
-            // Если Core 0 уже успел снять STOP и опубликовать новый кадр,
+            // Если Core 0 уже успел снять STOP и положить новый кадр,
             // его флаги не трогаем — обработаем на следующей итерации.
-            if (!nextSeg.hasNewData) {
+            if (frameCount == 0) {
                 isVectorMoving = false;
                 isPlannerBusy = false;
             }
@@ -832,9 +871,9 @@ void motionTask(void * parameter) {
         if (frameAborted || motionStopRequested || alarmRequested) {
             portENTER_CRITICAL(&xferMux);
             isMotionGenerating = false; // отпускаем requestMotionStop()
-            // Новый кадр мог быть опубликован сразу после снятия STOP —
+            // Новый кадр мог быть положен в очередь сразу после снятия STOP —
             // не затираем его флаги и обработаем на следующей итерации.
-            if (!nextSeg.hasNewData) {
+            if (frameCount == 0) {
                 isVectorMoving = false;
                 isPlannerBusy = false;
             }
@@ -883,8 +922,11 @@ static void IRAM_ATTR emergencyStopFromISR() {
 
     isVectorMoving = false;
     isPlannerBusy = false;
+    // Кадры, ещё не взятые генератором, отменяем прямо в прерывании.
     portENTER_CRITICAL_ISR(&xferMux);
-    nextSeg.hasNewData = false;
+    frameHead  = 0;
+    frameTail  = 0;
+    frameCount = 0;
     portEXIT_CRITICAL_ISR(&xferMux);
     timerPhaseHigh = true;
 }

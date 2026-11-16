@@ -77,12 +77,15 @@ void setWcsZero(char axis) {
 }
 
 // ЦЕНТРАЛЬНЫЙ ДИСПЕТЧЕР КОМАНД
-void executeNextProgramStep() {
+// P1-3: вызывается в цикле из supervisorTask, пока в очереди кадров есть место.
+// Возвращает true, если команда исполнена (индекс сдвинулся): тогда можно
+// немедленно взять следующую и держать конвейер заполненным.
+bool executeNextProgramStep() {
     // 1. Проверка покадрового режима (Single Block)
     if (isSingleBlockMode && waitNextBlockTrigger) {
         // Зависаем в этом состоянии, Ядро 1 крутит удержание, моторы стоят.
         // Выход из условия произойдет, когда Wi-Fi модуль сбросит waitNextBlockTrigger в false
-        return; 
+        return false;
     }
 
     // Если все кадры из статического ОЗУ-буфера полностью закончились
@@ -92,56 +95,26 @@ void executeNextProgramStep() {
             changeState(STATE_IDLE); 
             Serial.println("STATUS: Program finished successfully.");
         }
-        return;
+        return false;
     }
 
     BinaryCommand cmd = gcodeBuffer[currentCommandIndex];
+    const bool isMotion = (cmd.cmdType == 0 || cmd.cmdType == 1);
+
+    // 2. P1-3: неподвижные команды (M3/M5/M8/M9) — барьер конвейера.
+    // Класть их в очередь кадров нельзя: реле обязано сработать в своей точке
+    // траектории, а не за несколько кадров до неё. Поэтому M-код исполняется
+    // только после полного слива кольца тактов и очереди. Индекс при этом не
+    // сдвигаем — вернёмся к этой же команде на следующей итерации.
+    if (!isMotion && isPlannerBusy) return false;
+
     currentCommandIndex++; 
     currentExecutingLineNum = cmd.lineNum; 
     cfg.lastExecutedLine = cmd.lineNum;
 
-    if (cmd.cmdType == 0 || cmd.cmdType == 1) {
-        // Базовый перевод рабочей координаты детали (WCS G54) в машинную координату станины
-        float machineX = cmd.x + wcsOffset.x;
-        float machineY = cmd.y + wcsOffset.y;
-        float machineZ = cmd.z + wcsOffset.z;
-
-        // --- МАТЕМАТИКА КОРРЕКЦИИ НАКЛОНА ЗАГОТОВКИ ---
-        if (isAlignmentActive) {
-            // Находим, насколько далеко мы уехали от опорной Точки А по оси X
-            float deltaX_from_A = machineX - pointA.x;
-            
-            // Динамически подмешиваем компенсацию непараллельности станины к детали
-            machineY += deltaX_from_A * slopeY;
-            machineZ += deltaX_from_A * slopeZ;
-        }
-
-        
-        // P0-8: не запускаем кадр за пределы рабочего поля и не двигаемся частично.
-        String limitErr;
-        if (!validateMachineTarget(machineX, machineY, machineZ, &limitErr)) {
-            Serial.println(limitErr);
-            sendToWiFiClient(limitErr);
-            changeState(STATE_IDLE); // остановить программу, а не ехать дальше
-            return;
-        }
-
-        // Передаем 7 параметров. Скорости v_start и v_end уже лежат в структуре cmd,
-        // так как их рассчитал и прислал Look-Ahead модуль на Python!
-        prepareVectorSegment(machineX, machineY, machineZ, cmd.f, cfg.maxAcceleration, cmd.v_start, cmd.v_end);
-
-
-        // Если включен покадровый режим, взводим флаг ожидания для СЛЕДУЮЩЕГО кадра
-        if (isSingleBlockMode) {
-            waitNextBlockTrigger = true;
-            Serial.printf("STATUS: Block %d executed. Waiting next block trigger...\n", currentCommandIndex - 1);
-            // Шлем в сокет оповещение для Python, чтобы кнопка "След. Кадр" стала активной
-            extern void sendToWiFiClient(String message);
-            sendToWiFiClient("SINGLE_BLOCK_WAIT");
-        }
-    } 
-    else {
-        // Исполнение М-кодов
+    if (!isMotion) {
+        // Исполнение М-кодов. Рекурсии нет (P2-8): следующую команду заберёт
+        // цикл в supervisorTask, поэтому серия M3/M5/M8/M9 не растёт по стеку.
         switch (cmd.cmdType) {
             case 3: digitalWrite(RELE_SPINDLE, HIGH); break;
             case 5: digitalWrite(RELE_SPINDLE, LOW);  break;
@@ -149,9 +122,48 @@ void executeNextProgramStep() {
             case 9: digitalWrite(RELE_COOLANT, LOW);  break;
             default: break;
         }
-        // М-коды пролетают мгновенно, Single Block на них не вешаем, запрашиваем следующий шаг
-        executeNextProgramStep(); 
+        return true;
     }
+
+    // --- КАДР ДВИЖЕНИЯ ---
+    // Базовый перевод рабочей координаты детали (WCS G54) в машинную координату станины
+    float machineX = cmd.x + wcsOffset.x;
+    float machineY = cmd.y + wcsOffset.y;
+    float machineZ = cmd.z + wcsOffset.z;
+
+    // --- МАТЕМАТИКА КОРРЕКЦИИ НАКЛОНА ЗАГОТОВКИ ---
+    if (isAlignmentActive) {
+        // Находим, насколько далеко мы уехали от опорной Точки А по оси X
+        float deltaX_from_A = machineX - pointA.x;
+
+        // Динамически подмешиваем компенсацию непараллельности станины к детали
+        machineY += deltaX_from_A * slopeY;
+        machineZ += deltaX_from_A * slopeZ;
+    }
+
+    // P0-8: не запускаем кадр за пределы рабочего поля и не двигаемся частично.
+    String limitErr;
+    if (!validateMachineTarget(machineX, machineY, machineZ, &limitErr)) {
+        Serial.println(limitErr);
+        sendToWiFiClient(limitErr);
+        changeState(STATE_IDLE); // остановить программу, а не ехать дальше
+        return false;
+    }
+
+    // Передаем 7 параметров. Скорости v_start и v_end уже лежат в структуре cmd,
+    // так как их рассчитал и прислал Look-Ahead модуль на Python!
+    bool queued = prepareVectorSegment(machineX, machineY, machineZ, cmd.f,
+                                       cfg.maxAcceleration, cmd.v_start, cmd.v_end);
+
+    // Если включен покадровый режим, взводим флаг ожидания для СЛЕДУЮЩЕГО кадра
+    if (queued && isSingleBlockMode) {
+        waitNextBlockTrigger = true;
+        Serial.printf("STATUS: Block %d executed. Waiting next block trigger...\n", currentCommandIndex - 1);
+        // Шлем в сокет оповещение для Python, чтобы кнопка "След. Кадр" стала активной
+        extern void sendToWiFiClient(String message);
+        sendToWiFiClient("SINGLE_BLOCK_WAIT");
+    }
+    return queued;
 }
 
 // Протокольные пределы JOG: F задаётся в мм/мин, как в обычном G-коде.

@@ -55,8 +55,11 @@ void setAlignmentPoint(char pointLetter); // Запомнить текущую �
 void calculateAlignmentMatrix();          // Расчет коэффициентов наклона
 void deactivateAlignmentExternal(); 
 
-// ГЛАВНЫЙ ИСПОЛНИТЕЛЬ: Выдергивает команду из буфера и распределяет её по модулям
-void executeNextProgramStep();
+// ГЛАВНЫЙ ИСПОЛНИТЕЛЬ: выдергивает одну команду из буфера и распределяет её
+// по модулям. true = команда исполнена и индекс продвинулся; false = двигаться
+// дальше нельзя (программа кончилась, ждём Single Block, M-код ждёт слива
+// движения или кадр отклонён).
+bool executeNextProgramStep();
 
 // Обработчик одиночных ручных команд (JOG). false = команда отклонена.
 bool processSingleManualCommand(String line);
