@@ -144,6 +144,15 @@ static void supervisorTask(void *parameter) {
             while (canQueueFrame() && continueManualJogSplit()) { }
         }
 
+        // P2-3: JOG завершён, когда нарезка кончилась и движение слилось.
+        // isPlannerBusy = false — «очередь кадров и кольцо шагов пусты, станок
+        // стоит», поэтому переход в IDLE не режет остаток кадра. Без него
+        // станок оставался в JOGGING навсегда, и следующие JOG/HOME/
+        // START_PROGRAM отклонялись до RESET_ALARM.
+        if (currentMachineState == STATE_JOGGING && !isSplitActive() && !isPlannerBusy) {
+            changeState(STATE_IDLE);
+        }
+
         // Плавное гашение подачи (HOLD / Пауза)
         updateFeedrateFading();
 
