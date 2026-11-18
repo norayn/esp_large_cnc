@@ -9,6 +9,12 @@
 
 ## P2 — команды, протокол, парсеры, конфиг, шпиндель
 
+- **P2-3 · Возвращать JOG в `IDLE`.** *(2026-11-17: `supervisorTask` снимает `JOGGING` по `!isSplitActive() && !isPlannerBusy`, новый JOG — только из `IDLE`; коммит `5c222d3`)*
+  `src/main.cpp` — цикл `supervisorTask`; `src/wifi_manager.cpp` — `handleIdleCommands()`; `docs/fsm-safety.md §3.2`.
+  После JOG станок оставался в `STATE_JOGGING` навсегда: `handleIdleCommands()` работает только в `IDLE`, поэтому следующие `JOG`/`HOME`/`START_PROGRAM` отклонялись, и выйти можно было только через `RESET_ALARM`/`ESTOP`.
+  **Сделано:** когда нарезка закончена и `isPlannerBusy = false` («очередь кадров и кольцо шагов пусты»), `supervisorTask` переводит FSM в `IDLE`. Это условие «станок стоит», поэтому переход не режет остаток хода и не зависит от времени: таймаут не нужен, а зависание движения — отдельная диагностика. Новый JOG принимается только в `IDLE` (очередь JOG не поддерживается намеренно: второй JOG во время нарезки сбросил бы остаток первого), серия команд идёт по факту `IDLE` в телеметрии.
+  **Как проверено:** `pio run` — SUCCESS; серия JOG на железе не прогонялась (нет доступа к станку).
+
 - **P2-6 · Убрать дублирование телеметрии.** *(2026-11-17: `sendToWiFiClient()` — только TCP, добавлен `sendToBothClients()` для TCP+USB; период телеметрии ограничен снизу 50 мс; коммит `d936b08`)*
   `src/wifi_manager.cpp/.h` — `sendToWiFiClient()`, `sendToBothClients()`; `src/state_manager.cpp` — `reportStatusToPC()`; `src/main.cpp`; `docs/protocol.md §6.2`.
   `sendToWiFiClient()` печатала строку и в сокет, и в `Serial`, а `reportStatusToPC()` печатал статус в `Serial` ещё раз → в мониторе USB каждая строка телеметрии шла дважды. Тот же эхо-дубль был у всех пар `Serial.println(err); sendToWiFiClient(err);`.

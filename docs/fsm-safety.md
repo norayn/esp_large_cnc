@@ -11,7 +11,7 @@
 | `STATE_INIT` | начальное состояние после подачи питания (кратковременное) |
 | `STATE_ALARM` | авария: моторы обесточены, реле шпинделя/СОЖ выключены |
 | `STATE_IDLE` | покой, приём команд; при `!isHomed` отображается как `IDLE (LOCKED)` |
-| `STATE_JOGGING` | ручное перемещение |
+| `STATE_JOGGING` | ручное перемещение; по завершении — автоматически `IDLE` |
 | `STATE_CALIBRATION` | сервисные сканирования (`START_CALIBRATION`, `SCAN_GEOMETRY`) |
 | `STATE_MAP_TRANSFER` | импорт карты лазера с ПК |
 | `STATE_RUNNING` | выполнение УП |
@@ -26,6 +26,7 @@
 - `RESET_ALARM` **сбрасывает** `isHomed = false`, то есть после сброса аварии требуется повторный хоуминг.
 - `ESTOP` переводит в `ALARM`, обесточивает моторы и выключает реле.
 - `HOME`/`$H` доступны только из `IDLE`.
+- `JOGGING` снимается сам: когда нарезка закончена (`!isSplitActive()`) и `isPlannerBusy = false` («очередь кадров и кольцо шагов пусты»), `supervisorTask` возвращает `IDLE`. Поэтому серия JOG не требует `RESET_ALARM`; новый `JOG` принимается только в `IDLE`.
 - `HOLD`/`!` — только из `RUNNING`/`JOGGING`; `RESUME`/`~` — только из `HOLD` и возвращает в то состояние, из которого пришли (пауза во время JOG не запускает УП).
 
 `HOME`, `JOG`, `START_PROGRAM`, `START_FROM_LINE`, `START_CALIBRATION` и `SCAN_GEOMETRY` проверяют результат `changeState()` и при отказе не двигают станок. `startProgramExecution()` дополнительно требует `isHomed`, `totalLoadedCommands > 0` и отсутствие `ALARM`.
