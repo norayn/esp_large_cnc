@@ -42,7 +42,7 @@ python3 scripts/docs.py links   # ссылки и анкоры
 | планировщик, буфер, ISR, HOLD/OVERRIDE | [docs/motion.md](docs/motion.md) |
 | WCS, наклон, карту провиса, сканы | [docs/geometry.md](docs/geometry.md) |
 | команды, форматы, единицы | [docs/protocol.md](docs/protocol.md) |
-| протокол в связке с GUI | [docs/gui.md](docs/gui.md) |
+| протокол, сценарии GUI | [docs/gui.md](docs/gui.md), [gui-app.md](docs/gui-app.md), [gui-flows.md](docs/gui-flows.md) |
 | GPIO, платформу, прошивку | [docs/hardware.md](docs/hardware.md) |
 | поле конфига, NVS | [docs/config.md](docs/config.md) |
 | что делать дальше | [TODO.md](TODO.md) — индекс открытых пунктов, затем только нужный ID в `docs/tasks/pN.md` |
