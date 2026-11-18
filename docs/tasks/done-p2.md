@@ -9,6 +9,12 @@
 
 ## P2 — команды, протокол, парсеры, конфиг, шпиндель
 
+- **P2-1 · Исправить `START_FROM_LINE`.** *(2026-11-18: `startProgramExecution(startIndex)` запускает с найденного кадра, первый кадр движения входит с нулевой скоростью; коммит `35d0a51`)*
+  `src/wifi_manager.cpp` — `handleIdleCommands()`; `src/gcode_program.cpp/.h` — `startProgramExecution()`.
+  Обработчик находил индекс строки, но `startProgramExecution()` безусловно ставил `currentCommandIndex = 0`, поэтому УП всегда шла с начала. Если строки в буфере не было, обработчик молча завершался, не сообщая об ошибке.
+  **Сделано:** стартовый индекс передаётся параметром (`int startIndex = 0`) и проверяется на диапазон; `currentCommandIndex` выставляется на найденный кадр, `syncPlannerToActual()` по-прежнему привязывает планировщик к фактической позиции, `resetSplit()` убирает недоигранную нарезку. Неизвестная строка — `ERROR: Line <N> not found in loaded program.` в TCP и USB. При `startIndex > 0` у первого кадра движения обнуляется `v_start`: Look-Ahead считал вход из кадра, которого в этом запуске нет, а станок стоит.
+  **Как проверено:** `pio run` — SUCCESS; запуск с середины файла на железе не прогонялся (нет доступа к станку).
+
 - **P2-8 · Убрать рекурсию M-кодов.** *(2026-11-18: закрыт ещё в P1-3 — `executeNextProgramStep()` не вызывает себя; коммит `7b3b8df`)*
   `src/gcode_program.cpp` — `executeNextProgramStep()`; `src/main.cpp` — цикл `supervisorTask`.
   Каждый M-код вызывал `executeNextProgramStep()` рекурсивно, и длинная серия `M3/M5/M8/M9` могла переполнить стек `supervisorTask`.

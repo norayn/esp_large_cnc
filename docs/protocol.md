@@ -54,7 +54,7 @@
 | `GET_CONFIG` | выдать `CONFIG_DATA:…` (все поля `CONFIG_FIELDS`) |
 | `SET_CONFIG:<name>=<value>` | изменить параметр и сохранить **весь** конфиг в NVS |
 | `START_PROGRAM` | старт загруженной УП |
-| `START_FROM_LINE:<N>` | старт с строки (фактически всегда с 0, P2-1) |
+| `START_FROM_LINE:<N>` | старт со строки `<N>` с места; неизвестная строка — `ERROR` |
 | `GET_LAST_ABORTED_LINE` | `LAST_LINE:<N>` (значение сохраняется только в `ALARM`) |
 | `SINGLE_BLOCK_ON/OFF` | включить/выключить покадровый режим |
 | `SET_ALIGN_A` / `SET_ALIGN_B` | запомнить точки A/B |
