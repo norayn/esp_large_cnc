@@ -338,11 +338,39 @@ bool executeNextProgramStep() {
 static const float JOG_MIN_FEED_MM_MIN = 1.0f;
 static const float JOG_MAX_FEED_MM_MIN = 20000.0f;
 
+// Номер G-слова из строки JOG. Ищем отдельный токен "G<цифры>", а не
+// подстроку: "G01" и "G1.0" — это G1, а "G10" — уже не G1 (P2-9).
+// Дробная часть отбрасывается: номера G-кодов целые. false — G-слова нет.
+static bool parseGWord(const String &line, int &number) {
+    const int len = (int)line.length();
+    for (int i = 0; i < len; i++) {
+        if (line[i] != 'G') continue;
+        // Буква должна начинать слово, иначе это часть другого токена.
+        if (i > 0 && line[i - 1] != ' ' && line[i - 1] != '\t') continue;
+
+        int j = i + 1;
+        if (j >= len || line[j] < '0' || line[j] > '9') continue;
+
+        long value = 0;
+        while (j < len && line[j] >= '0' && line[j] <= '9') {
+            value = value * 10 + (line[j] - '0');
+            if (value > 999) return false; // мусор вместо номера
+            j++;
+        }
+        number = (int)value;
+        return true;
+    }
+    return false;
+}
+
 bool processSingleManualCommand(String line) {
     line.toUpperCase();
     uint8_t type = 255;
-    if (line.indexOf("G0") != -1) type = 0;
-    if (line.indexOf("G1") != -1) type = 1;
+    int gWord = 0;
+    if (parseGWord(line, gWord)) {
+        if (gWord == 0) type = 0;
+        else if (gWord == 1) type = 1;
+    }
     if ((type == 0 || type == 1) && !isPlannerBusy) {
         // P0-4: первый JOG после аварии/отладки не должен считать дельту
         // от устаревшей математической базы. Во время движения базу не трогаем:
