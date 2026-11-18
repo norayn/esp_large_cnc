@@ -9,6 +9,18 @@
 
 ## P2 — команды, протокол, парсеры, конфиг, шпиндель
 
+- **P2-8 · Убрать рекурсию M-кодов.** *(2026-11-18: закрыт ещё в P1-3 — `executeNextProgramStep()` не вызывает себя; коммит `7b3b8df`)*
+  `src/gcode_program.cpp` — `executeNextProgramStep()`; `src/main.cpp` — цикл `supervisorTask`.
+  Каждый M-код вызывал `executeNextProgramStep()` рекурсивно, и длинная серия `M3/M5/M8/M9` могла переполнить стек `supervisorTask`.
+  **Сделано (P1-3):** M-код — барьер конвейера: он исполняется только после слива кольца и очереди, индекс сдвигается, функция возвращает `true`, а следующий кадр забирает цикл `while (canQueueFrame() && executeNextProgramStep())` в `supervisorTask`. Рекурсивных вызовов в коде нет, глубина стека не зависит от числа M-кодов.
+  **Проверено:** поиск по `executeNextProgramStep()` даёт только объявление, начальный вызов в `startProgramExecution()` и цикл фидера; `pio run` — SUCCESS; серия 2000 M-кодов на железе не прогонялась.
+
+- **P2-9 · Исправить разбор `G01`.** *(2026-11-18: `parseGWord()` читает номер G-слова как число; `G01`/`G1.0` — это `G1`, `G10` отклоняется; коммит `9ee3e7a`)*
+  `src/gcode_program.cpp` — `processSingleManualCommand()`, `parseGWord()`.
+  `line.indexOf("G0")` срабатывал внутри `G01`, поэтому тип оставался 0 (G0) вместо G1; `indexOf("G1")` так же ловил `G10`.
+  **Сделано:** номер G-слова ищется как отдельный токен `G<цифры>` на границе слова, дробная часть отбрасывается (номера G-кодов целые). `G0`/`G00` → G0, `G1`/`G01`/`G1.0` → G1, остальные номера отклоняются прежней проверкой `ERROR: JOG requires G0 or G1.` Регистр не важен: строка приводится к верхнему до разбора.
+  **Как проверено:** `pio run` — SUCCESS; разбор прогнан на наборе строк (`G0`, `G00`, `G1`, `G01`, `G1.0`, `g1`, `G1X10`, `G10`) отдельным стендом; на железе JOG не прогонялся.
+
 - **P2-3 · Возвращать JOG в `IDLE`.** *(2026-11-17: `supervisorTask` снимает `JOGGING` по `!isSplitActive() && !isPlannerBusy`, новый JOG — только из `IDLE`; коммит `5c222d3`)*
   `src/main.cpp` — цикл `supervisorTask`; `src/wifi_manager.cpp` — `handleIdleCommands()`; `docs/fsm-safety.md §3.2`.
   После JOG станок оставался в `STATE_JOGGING` навсегда: `handleIdleCommands()` работает только в `IDLE`, поэтому следующие `JOG`/`HOME`/`START_PROGRAM` отклонялись, и выйти можно было только через `RESET_ALARM`/`ESTOP`.
