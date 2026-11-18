@@ -70,7 +70,9 @@ bool processSingleManualCommand(String line);
 bool isSplitActive();
 bool continueManualJogSplit();
 
-// true = программа запущена; false = отказ (ALARM, нет хоуминга или пустой буфер).
-bool startProgramExecution();
+// startIndex — индекс кадра в буфере, с которого начинается запуск
+// (START_FROM_LINE). true = программа запущена; false = отказ (ALARM, нет
+// хоуминга, пустой буфер или startIndex вне 0..totalLoadedCommands-1).
+bool startProgramExecution(int startIndex = 0);
 
 #endif

@@ -489,7 +489,7 @@ void deactivateAlignmentExternal() {
     saveAlignmentToEEPROM();
 }
 
-bool startProgramExecution() {
+bool startProgramExecution(int startIndex) {
     // Запуск УП запрещён в ALARM, без хоуминга и при пустом буфере.
     if (currentMachineState == STATE_ALARM) {
         String err = "ERROR: Machine is in ALARM. Send RESET_ALARM first.";
@@ -506,13 +506,31 @@ bool startProgramExecution() {
         Serial.println(err); sendToWiFiClient(err);
         return false;
     }
+    if (startIndex < 0 || startIndex >= totalLoadedCommands) {
+        String err = "ERROR: Start frame is outside the loaded program.";
+        Serial.println(err); sendToWiFiClient(err);
+        return false;
+    }
 
     // ЖЕСТКИЙ HANDSHAKE БАЗЫ: Перед запуском первого кадра УП 
     // приравниваем виртуальные оси планировщика к реальному положению моторов на столе
     syncPlannerToActual();
 
     resetSplit();             // P1-7: недоигранная нарезка прошлого запуска не нужна
-    currentCommandIndex = 0; // Сброс указателя на начало массива в ОЗУ
+
+    // P2-1: Look-Ahead считал скорость входа первого кадра из предыдущего
+    // кадра файла. При старте с середины этого кадра в запуске нет — станок
+    // стоит, поэтому входим в первый кадр движения с нуля.
+    if (startIndex > 0) {
+        for (int i = startIndex; i < totalLoadedCommands; i++) {
+            if (gcodeBuffer[i].cmdType == 0 || gcodeBuffer[i].cmdType == 1) {
+                gcodeBuffer[i].v_start = 0.0f;
+                break;
+            }
+        }
+    }
+
+    currentCommandIndex = startIndex; // P2-1: запуск с указанного кадра, не всегда с 0
     if (!changeState(STATE_RUNNING)) return false;
 
     executeNextProgramStep(); // Вызываем первый шаг

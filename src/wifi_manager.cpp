@@ -230,12 +230,18 @@ static bool handleIdleCommands(const String& cmd) {
         return true;
     }
     if (cmd.startsWith("START_FROM_LINE:")) {
-        int targetLine = cmd.substring(16).toInt();
-        bool lineFound = false;
+        const int targetLine = cmd.substring(16).toInt();
+        int startIndex = -1;
         for (int i = 0; i < totalLoadedCommands; i++) {
-            if (gcodeBuffer[i].lineNum == targetLine) { currentCommandIndex = i; lineFound = true; break; }
+            if (gcodeBuffer[i].lineNum == targetLine) { startIndex = i; break; }
         }
-        if (lineFound) { startProgramExecution(); }
+        if (startIndex < 0) {
+            // Молча ничего не делать нельзя: GUI решит, что программа пошла.
+            sendToBothClients("ERROR: Line " + String(targetLine) +
+                              " not found in loaded program.");
+            return true;
+        }
+        startProgramExecution(startIndex); // проверки ALARM/хоуминга внутри
         return true;
     }
     if (cmd == "GET_LAST_ABORTED_LINE") { sendToBothClients("LAST_LINE:" + String(cfg.lastExecutedLine)); return true; }
